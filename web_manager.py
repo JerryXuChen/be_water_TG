@@ -12,6 +12,7 @@ from threading import Lock
 
 from src.config import Settings
 from src.sender import TelegramSender
+from src.state_store import StateStore
 from ui.message_manager import MessageManager
 from ui.send_loop import SendRuntime, SendState, send_loop
 
@@ -53,6 +54,28 @@ class EventBus:
 
     async def emit_code_required(self) -> None:
         self._publish({"type": "code_required", "data": {}})
+
+    async def emit_group_state(self, state: dict) -> None:
+        self._publish({"type": "group_state", "data": state})
+
+    async def emit_decision(self, group: str, action: str, reason: str) -> None:
+        self._publish(
+            {
+                "type": "decision",
+                "data": {"group": group, "action": action, "reason": reason},
+            }
+        )
+
+    async def emit_alert(self, group: str, code: str, message: str) -> None:
+        self._publish(
+            {
+                "type": "alert",
+                "data": {"group": group, "code": code, "message": message},
+            }
+        )
+
+    async def emit_health(self, state: str, message: str = "") -> None:
+        self._publish({"type": "health", "data": {"state": state, "message": message}})
 
     def _publish(self, event: dict) -> None:
         """发布事件：分配递增 seq、入历史、广播至所有订阅者队列。"""
@@ -184,6 +207,8 @@ class SendLoopManager:
         self._runtime = SendRuntime()
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._state_store: StateStore | None = None
+        self._active_settings: Settings | None = None
 
     @property
     def state(self) -> SendState:
@@ -226,7 +251,9 @@ class SendLoopManager:
                 self._stop_event.set()
             return TransitionResult(ok=True)
 
-    def increment_count(self, group: str) -> tuple[int, int]:
+    def increment_count(
+        self, group: str, persisted_count: int | None = None
+    ) -> tuple[int, dict[str, int]]:
         """线程安全自增计数。
 
         Args:
@@ -236,11 +263,17 @@ class SendLoopManager:
             (new_total, new_per_group) 元组。
         """
         with self._state_lock:
-            self._runtime.total_count += 1
-            self._runtime.per_group_counts[group] = (
-                self._runtime.per_group_counts.get(group, 0) + 1
-            )
-            return self._runtime.total_count, self._runtime.per_group_counts[group]
+            previous = self._runtime.per_group_counts.get(group, 0)
+            new_value = persisted_count if persisted_count is not None else previous + 1
+            self._runtime.per_group_counts[group] = new_value
+            self._runtime.total_count += max(0, new_value - previous)
+            return self._runtime.total_count, dict(self._runtime.per_group_counts)
+
+    def set_persisted_count(self, group: str, count: int) -> None:
+        with self._state_lock:
+            previous = self._runtime.per_group_counts.get(group, 0)
+            self._runtime.per_group_counts[group] = count
+            self._runtime.total_count += count - previous
 
     def runtime_counts_snapshot(self) -> tuple[int, dict[str, int]]:
         """线程安全快照：返回 (total, per_group_dict_copy)。"""
@@ -263,9 +296,16 @@ class SendLoopManager:
         ai_sender=None,
     ) -> TransitionResult:
         """启动发送循环。通过 transition 单一入口转 STARTING 再起后台线程。"""
+        try:
+            state_store = StateStore(settings.state_db_path)
+        except Exception as exc:
+            return TransitionResult(ok=False, reason=f"State store unavailable: {exc}")
         result = self.transition(SendState.STARTING)
         if not result.ok:
             return result
+        self._active_settings = settings
+        self._state_store = state_store
+        self._runtime = SendRuntime()
         self._thread = threading.Thread(
             target=self._run_loop,
             args=(sender, settings, message_manager, ai_sender),
@@ -305,6 +345,7 @@ class SendLoopManager:
                 message_manager=message_manager,
                 event_bus=self._event_bus,
                 ai_sender=ai_sender,
+                state_store=self._state_store,
             )
 
         try:
@@ -325,6 +366,8 @@ class SendLoopManager:
             loop.close()
             self._loop = None
             self._thread = None
+            self._active_settings = None
+            self._state_store = None
 
     def pause(self) -> TransitionResult:
         return self.transition(SendState.PAUSING)
@@ -334,6 +377,54 @@ class SendLoopManager:
 
     def stop(self) -> TransitionResult:
         return self.transition(SendState.STOPPING)
+
+    def request_emergency_stop(self) -> None:
+        """Fail closed when durable accounting can no longer be guaranteed."""
+        with self._state_lock:
+            self._stop_event.set()
+            if self._state not in (SendState.STOPPING, SendState.STOPPED, SendState.IDLE):
+                self._state = SendState.STOPPING
+
+    def dashboard_snapshot(self) -> dict:
+        with self._state_lock:
+            state = self._state.value
+            total = self._runtime.total_count
+            per_group = dict(self._runtime.per_group_counts)
+            settings = self._active_settings
+            store = self._state_store
+        groups = settings.target_groups if settings else list(per_group)
+        group_states = (
+            [StateStore.serialize_state(item) for item in store.list_group_states(groups)]
+            if store
+            else []
+        )
+        return {
+            "state": state,
+            "total": total,
+            "per_group": per_group,
+            "groups": group_states,
+            "alerts": [item for item in group_states if item["paused"]],
+        }
+
+    def audit_events(self, limit: int = 100) -> list[dict]:
+        if self._state_store is None:
+            return []
+        return [
+            {
+                "seq": event.seq,
+                "occurred_at": event.occurred_at,
+                "group": event.group,
+                "event_type": event.event_type,
+                "reason": event.reason,
+                "metadata": event.metadata,
+            }
+            for event in self._state_store.list_audit(limit)
+        ]
+
+    def resume_group(self, group: str) -> dict:
+        if self._state_store is None:
+            raise RuntimeError("State store is not initialized")
+        return StateStore.serialize_state(self._state_store.resume_group(group))
 
     def submit_code(self, code: str) -> bool:
         return self._event_bus.submit_code(code)

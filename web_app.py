@@ -10,9 +10,16 @@ from flask import Flask, Response, jsonify, render_template, request
 
 from src.ai_client import AIClient
 from src.ai_sender import AISender
-from src.config import Settings, load_settings, save_settings
+from src.config import (
+    Settings,
+    SettingsValidationError,
+    load_settings,
+    save_settings,
+    validate_settings_for_save,
+)
 from src.group_parser import parse_group_links, validate_group_links
 from src.sender import TelegramSender
+from src.state_store import StateStore
 from ui.message_manager import MessageManager
 from web_manager import LogQueueHandler, SendLoopManager
 
@@ -42,7 +49,8 @@ def api_config_get():
             "success": True,
             "config": {
                 "api_id": settings.api_id,
-                "api_hash": settings.api_hash,
+                "api_hash": "",
+                "api_hash_set": bool(settings.api_hash),
                 "phone": settings.phone,
                 "target_groups": settings.target_groups,
                 "min_interval": settings.min_interval,
@@ -52,7 +60,8 @@ def api_config_get():
                 "proxy_type": settings.proxy_type,
                 "message_files": settings.message_files,
                 "ai_enabled": settings.ai_enabled,
-                "ai_api_key": settings.ai_api_key,
+                "ai_api_key": "",
+                "ai_api_key_set": bool(settings.ai_api_key),
                 "ai_base_url": settings.ai_base_url,
                 "ai_model": settings.ai_model,
                 "ai_prompt": settings.ai_prompt,
@@ -73,6 +82,12 @@ def api_config_get():
                 "skip_round_pct": settings.skip_round_pct,
                 "group_gap_min": settings.group_gap_min,
                 "group_gap_max": settings.group_gap_max,
+                "daily_limit": settings.daily_limit,
+                "idle_threshold_minutes": settings.idle_threshold_minutes,
+                "question_reply_pct": settings.question_reply_pct,
+                "discussion_reply_pct": settings.discussion_reply_pct,
+                "reply_delay_min": settings.reply_delay_min,
+                "reply_delay_max": settings.reply_delay_max,
             },
         })
     except Exception as ex:
@@ -91,10 +106,27 @@ def api_config_save():
         target_groups = data.get("target_groups", [])
         if isinstance(target_groups, str):
             target_groups = parse_group_links(target_groups)
+        elif isinstance(target_groups, list):
+            target_groups = parse_group_links(",".join(str(item) for item in target_groups))
+        else:
+            raise SettingsValidationError("target_groups", "Target groups must be a list or string")
+        try:
+            validate_group_links(target_groups)
+        except ValueError as ex:
+            raise SettingsValidationError("target_groups", str(ex)) from ex
 
+        try:
+            current = load_settings()
+        except Exception:
+            current = None
+        raw_message_files = data.get("message_files", {})
+        if not isinstance(raw_message_files, dict):
+            raise SettingsValidationError(
+                "message_files", "Message files must be a group-to-path mapping"
+            )
         settings = Settings(
             api_id=int(data.get("api_id", 0)),
-            api_hash=data.get("api_hash", ""),
+            api_hash=data.get("api_hash") or (current.api_hash if current else ""),
             phone=data.get("phone", ""),
             target_groups=target_groups,
             min_interval=int(data.get("min_interval", 60)),
@@ -102,9 +134,12 @@ def api_config_save():
             proxy_host=data.get("proxy_host") or None,
             proxy_port=data.get("proxy_port") or None,
             proxy_type=data.get("proxy_type", "http"),
-            message_files=data.get("message_files", {}),
+            message_files=raw_message_files,
             ai_enabled=bool(data.get("ai_enabled", False)),
-            ai_api_key=data.get("ai_api_key", ""),
+            ai_api_key=(
+                data.get("ai_api_key")
+                or (current.ai_api_key if current and data.get("ai_enabled", False) else "")
+            ),
             ai_base_url=data.get("ai_base_url", "https://api.deepseek.com/v1"),
             ai_model=data.get("ai_model", "deepseek-chat"),
             ai_prompt=data.get("ai_prompt", ""),
@@ -125,9 +160,19 @@ def api_config_save():
             skip_round_pct=int(data.get("skip_round_pct", 10)),
             group_gap_min=int(data.get("group_gap_min", 1)),
             group_gap_max=int(data.get("group_gap_max", 1)),
+            daily_limit=int(data.get("daily_limit", 30)),
+            idle_threshold_minutes=int(data.get("idle_threshold_minutes", 10)),
+            question_reply_pct=int(data.get("question_reply_pct", 70)),
+            discussion_reply_pct=int(data.get("discussion_reply_pct", 15)),
+            reply_delay_min=int(data.get("reply_delay_min", 20)),
+            reply_delay_max=int(data.get("reply_delay_max", 90)),
+            state_db_path=(current.state_db_path if current else "state/be_water.db"),
         )
+        validate_settings_for_save(settings)
         save_settings(settings)
         return jsonify({"success": True})
+    except SettingsValidationError as ex:
+        return jsonify({"success": False, "error": str(ex), "field": ex.field}), 422
     except Exception as ex:
         return jsonify({"success": False, "error": str(ex)}), 400
 
@@ -156,8 +201,13 @@ def api_start():
     if settings.message_files:
         group_file_map = settings.message_files
     else:
+        shared_fallback = Path("messages.txt")
         for g in settings.target_groups:
-            group_file_map[g] = f"messages_{g.split('/')[-1]}.txt"
+            group_file_map[g] = (
+                str(shared_fallback)
+                if shared_fallback.exists()
+                else f"messages_{g.split('/')[-1]}.txt"
+            )
 
     try:
         message_manager = MessageManager(group_file_map)
@@ -206,6 +256,76 @@ def api_stop():
     if not result.ok:
         return jsonify({"success": False, "error": result.reason}), 409
     return jsonify({"success": True})
+
+
+@app.route("/api/dashboard")
+def api_dashboard():
+    """Return a durable runtime snapshot for the overview page."""
+    snapshot = manager.dashboard_snapshot()
+    if not snapshot["groups"]:
+        try:
+            settings = load_settings()
+            store = StateStore(settings.state_db_path)
+            groups = [
+                StateStore.serialize_state(item)
+                for item in store.list_group_states(settings.target_groups)
+            ]
+            snapshot["groups"] = groups
+            snapshot["alerts"] = [item for item in groups if item["paused"]]
+            snapshot["total"] = sum(item["sent_count"] for item in groups)
+            snapshot["per_group"] = {
+                item["group"]: item["sent_count"] for item in groups
+            }
+        except Exception as ex:
+            return jsonify({"success": False, "error": str(ex)}), 400
+    return jsonify({"success": True, "dashboard": snapshot})
+
+
+@app.route("/api/audit")
+def api_audit():
+    try:
+        limit = int(request.args.get("limit", "100"))
+    except ValueError:
+        limit = 100
+    events = manager.audit_events(limit)
+    if not events:
+        try:
+            settings = load_settings()
+            events = [
+                {
+                    "seq": event.seq,
+                    "occurred_at": event.occurred_at,
+                    "group": event.group,
+                    "event_type": event.event_type,
+                    "reason": event.reason,
+                    "metadata": event.metadata,
+                }
+                for event in StateStore(settings.state_db_path).list_audit(limit)
+            ]
+        except Exception:
+            events = []
+    return jsonify({"success": True, "events": events})
+
+
+@app.route("/api/groups/resume", methods=["POST"])
+def api_group_resume():
+    data = request.get_json(silent=True) or {}
+    group = str(data.get("group", "")).strip()
+    if not group:
+        return jsonify({"success": False, "error": "group is required"}), 400
+    try:
+        state = manager.resume_group(group)
+    except RuntimeError:
+        try:
+            settings = load_settings()
+            state = StateStore.serialize_state(
+                StateStore(settings.state_db_path).resume_group(group)
+            )
+        except Exception as ex:
+            return jsonify({"success": False, "error": str(ex)}), 409
+    except Exception as ex:
+        return jsonify({"success": False, "error": str(ex)}), 409
+    return jsonify({"success": True, "group": state})
 
 
 # ===== SSE 端点 =====

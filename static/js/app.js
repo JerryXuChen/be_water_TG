@@ -1,398 +1,331 @@
-// ===== SSE 连接 =====
-let evtSource = null;
-let sseErrorNotified = false;
+"use strict";
 
-function connectSSE() {
-  if (evtSource) evtSource.close();
-  const lastId = localStorage.getItem('sse_last_id') || '';
-  const url = lastId ? '/api/events?last_event_id=' + encodeURIComponent(lastId) : '/api/events';
-  evtSource = new EventSource(url);
+const appState = {
+  config: {},
+  dashboard: {state: "idle", total: 0, groups: [], alerts: []},
+  dirty: false,
+  evtSource: null,
+  toastTimer: null,
+};
 
-  evtSource.onmessage = function(event) {
-    try {
-      if (event.lastEventId) {
-        localStorage.setItem('sse_last_id', event.lastEventId);
-      }
-      sseErrorNotified = false;
-      const msg = JSON.parse(event.data);
-      switch (msg.type) {
-        case 'log': appendLog(msg.data.level, msg.data.message); break;
-        case 'status': updateStatus(msg.data.state); break;
-        case 'counter': updateCounter(msg.data.total, msg.data.per_group); break;
-        case 'countdown': updateCountdown(msg.data.seconds); break;
-        case 'code_required': showCodeInput(); break;
-      }
-    } catch(e) {}
-  };
+const byId = (id) => document.getElementById(id);
+const intValue = (id, fallback) => {
+  const value = Number.parseInt(byId(id)?.value ?? "", 10);
+  return Number.isFinite(value) ? value : fallback;
+};
+const floatValue = (id, fallback) => {
+  const value = Number.parseFloat(byId(id)?.value ?? "");
+  return Number.isFinite(value) ? value : fallback;
+};
 
-  evtSource.onerror = function() {
-    // EventSource 会自动重连；连续失败时给用户一次提示，避免刷屏
-    if (!sseErrorNotified) {
-      sseErrorNotified = true;
-      showToast('实时日志连接断开，正在尝试重连...', 'warning');
-    }
-  };
+function showToast(message, type = "") {
+  const toast = byId("toast");
+  toast.textContent = message;
+  toast.className = `toast ${type} show`;
+  clearTimeout(appState.toastTimer);
+  appState.toastTimer = setTimeout(() => { toast.className = "toast"; }, 3000);
 }
 
-// ===== 日志 =====
-const logTerminal = document.getElementById('logTerminal');
-let autoScroll = true;
-
-function appendLog(level, message) {
-  const wasAtBottom = logTerminal.scrollHeight - logTerminal.scrollTop - logTerminal.clientHeight < 30;
-  const timestamp = new Date().toLocaleTimeString('zh-CN', {hour12: false});
-  const cls = level === 'error' ? 'log-error' : level === 'warning' ? 'log-warning' : '';
-  const line = document.createElement('div');
-  line.className = 'log-entry ' + cls;
-  line.textContent = `[${timestamp}] ${message}`;
-  logTerminal.appendChild(line);
-  // 限制日志行数
-  while (logTerminal.children.length > 500) logTerminal.removeChild(logTerminal.firstChild);
-  if (wasAtBottom) logTerminal.scrollTop = logTerminal.scrollHeight;
+function setView(name) {
+  document.querySelectorAll(".view").forEach((view) => view.classList.remove("active"));
+  document.querySelectorAll(".nav-item").forEach((item) => item.classList.remove("active"));
+  byId(`view${name.charAt(0).toUpperCase()}${name.slice(1)}`)?.classList.add("active");
+  document.querySelector(`.nav-item[data-view="${name}"]`)?.classList.add("active");
+  if (name === "audit") loadAudit();
 }
 
-// ===== 状态指示 =====
 function updateStatus(state) {
-  const dot = document.getElementById('statusDot');
-  const text = document.getElementById('statusText');
-  dot.className = 'status-dot ' + state;
-
-  const statusMap = {
-    idle: '就绪',
-    starting: '启动中...',
-    running: '运行中...',
-    paused: '已暂停',
-    pausing: '暂停中...',
-    stopping: '停止中...',
-    stopped: '已停止',
-    waiting_code: '等待验证码...'
+  appState.dashboard.state = state;
+  const labels = {
+    idle: "未运行", starting: "正在启动", running: "运行中", pausing: "正在暂停",
+    paused: "已暂停", stopping: "正在停止", stopped: "已停止", waiting_code: "等待验证码",
   };
-  text.textContent = statusMap[state] || state;
-
-  // 控制按钮显隐
-  document.getElementById('btnStart').style.display =
-    (state === 'idle' || state === 'stopped') ? '' : 'none';
-  document.getElementById('btnPause').style.display = state === 'running' ? '' : 'none';
-  document.getElementById('btnResume').style.display = state === 'paused' ? '' : 'none';
-  document.getElementById('btnStop').style.display =
-    (state === 'starting' || state === 'running' || state === 'pausing' || state === 'paused' || state === 'waiting_code') ? '' : 'none';
+  byId("statusText").textContent = labels[state] || state;
+  byId("statusDot").className = `status-dot ${state}`;
+  const active = ["starting", "running", "pausing", "paused", "waiting_code"].includes(state);
+  byId("btnStart").hidden = active;
+  byId("btnPause").hidden = state !== "running";
+  byId("btnResume").hidden = state !== "paused";
+  byId("btnStop").hidden = !active;
 }
 
-// ===== 计数器 =====
-function updateCounter(total, perGroup) {
-  document.getElementById('totalCount').textContent = total;
-  document.getElementById('totalCountDetail').textContent = total;
-  const container = document.getElementById('perGroupCounts');
-  if (!perGroup) { container.innerHTML = ''; return; }
-  const parts = [];
-  for (const [link, count] of Object.entries(perGroup)) {
-    const name = link.replace(/\/+$/, '').split('/').pop().replace(/^@/, '');
-    parts.push(`<span class="counter-item">${name}: <strong>${count}</strong> 条</span>`);
-  }
-  container.innerHTML = parts.join(' &nbsp;|&nbsp; ');
+function groupName(group) {
+  return group.replace(/\/+$/, "").split("/").pop().replace(/^@/, "") || group;
 }
 
-// ===== 倒计时 =====
-function updateCountdown(seconds) {
-  const item = document.getElementById('countdownItem');
-  const text = document.getElementById('countdownText');
-  if (seconds <= 0) {
-    item.style.display = 'none';
+function normalizeGroupLink(group) {
+  const value = String(group || "").trim().replace(/\/+$/, "");
+  if (value.startsWith("@")) return `https://t.me/${value.slice(1)}`;
+  if (value.startsWith("t.me/")) return `https://${value}`;
+  return value;
+}
+
+function stateBadge(group) {
+  if (group.paused) return `<span class="badge paused">● ${escapeHtml(group.pause_kind)}</span>`;
+  return '<span class="badge">● 观察中</span>';
+}
+
+function escapeHtml(value) {
+  const div = document.createElement("div");
+  div.textContent = String(value ?? "");
+  return div.innerHTML;
+}
+
+function renderDashboard() {
+  const dashboard = appState.dashboard;
+  const groups = dashboard.groups || [];
+  const paused = groups.filter((group) => group.paused);
+  byId("metricTotal").textContent = dashboard.total || 0;
+  byId("sidebarTotal").textContent = dashboard.total || 0;
+  byId("metricWatching").textContent = groups.length - paused.length;
+  byId("metricPaused").textContent = paused.length;
+  byId("metricLimit").textContent = `${groups.length} 群 · 每群 ${appState.config.daily_limit || 30} 条上限`;
+  const rows = byId("overviewGroupRows");
+  if (!groups.length) {
+    rows.innerHTML = '<tr><td colspan="4" class="empty">尚未配置授权群组</td></tr>';
   } else {
-    item.style.display = '';
-    text.textContent = formatDuration(seconds);
+    rows.innerHTML = groups.map((group) => `<tr>
+      <td>${escapeHtml(groupName(group.group))}</td><td>${stateBadge(group)}</td>
+      <td>${group.sent_count} / ${appState.config.daily_limit || 30}</td>
+      <td>${escapeHtml(group.pause_reason || "等待新活动")}</td></tr>`).join("");
   }
+  const alertList = byId("alertList");
+  if (!paused.length) {
+    alertList.innerHTML = '<div class="empty">暂无告警</div>';
+  } else {
+    alertList.innerHTML = paused.map((group) => `<div class="alert-item"><strong>${escapeHtml(groupName(group.group))}</strong><span>${escapeHtml(group.pause_reason || group.pause_kind)}</span>${group.pause_kind === "safety" || group.pause_kind === "manual" ? `<button class="button secondary resume-group" data-group="${escapeHtml(group.group)}">检查后恢复</button>` : ""}</div>`).join("");
+  }
+  updateStatus(dashboard.state || "idle");
 }
 
-function formatDuration(seconds) {
-  if (seconds < 60) return seconds + '秒';
-  const m = Math.floor(seconds / 60);
-  const s = seconds % 60;
-  return m + '分' + s + '秒';
+async function api(url, options = {}) {
+  const response = await fetch(url, {headers: {"Content-Type": "application/json"}, ...options});
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || data.success === false) {
+    const error = new Error(data.detail || data.error || `HTTP ${response.status}`);
+    error.field = data.field;
+    throw error;
+  }
+  return data;
 }
 
-// ===== 验证码 =====
-function showCodeInput() {
-  document.getElementById('codeArea').classList.add('visible');
-  document.getElementById('codeInput').focus();
-}
-
-async function submitCode() {
-  const code = document.getElementById('codeInput').value.trim();
-  if (!code) return;
+async function loadDashboard() {
   try {
-    const resp = await fetch('/api/code', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({code: code})
-    });
-    const data = await resp.json();
-    if (!resp.ok || !data.success) {
-      showToast(data.error || '验证码提交失败', 'error');
-      return;
-    }
-    document.getElementById('codeInput').value = '';
-    document.getElementById('codeArea').classList.remove('visible');
-  } catch(e) {
-    showToast('网络错误: ' + e.message, 'error');
+    const data = await api("/api/dashboard");
+    appState.dashboard = data.dashboard;
+    renderDashboard();
+  } catch (error) {
+    showToast(`状态加载失败：${error.message}`, "error");
   }
 }
 
-// 回车提交验证码
-document.addEventListener('DOMContentLoaded', function() {
-  document.getElementById('codeInput').addEventListener('keydown', function(e) {
-    if (e.key === 'Enter') submitCode();
-  });
-});
-
-// ===== 发送请求 =====
-async function sendRequest(url) {
-  try {
-    const resp = await fetch(url, {method: 'POST'});
-    const data = await resp.json();
-    if (!resp.ok || !data.success) {
-      showToast(data.error || '操作失败', 'error');
-    }
-  } catch(e) {
-    showToast('网络错误: ' + e.message, 'error');
-  }
+function setInput(id, value) {
+  const element = byId(id);
+  if (element && value !== undefined && value !== null) element.value = value;
 }
-
-// ===== 配置表单 =====
-
-// 群组输入变化时重建消息文件行
-document.addEventListener('DOMContentLoaded', function() {
-  const groupsField = document.getElementById('target_groups');
-  if (groupsField) {
-    groupsField.addEventListener('input', rebuildMessageFiles);
-  }
-
-  // AI 开关切换
-  const aiToggle = document.getElementById('ai_enabled');
-  if (aiToggle) {
-    aiToggle.addEventListener('change', function() {
-      const visible = this.checked;
-      document.querySelectorAll('.ai-field').forEach(el => el.style.display = visible ? '' : 'none');
-    });
-  }
-
-  // 定时开关切换
-  const schedToggle = document.getElementById('schedule_enabled');
-  if (schedToggle) {
-    schedToggle.addEventListener('change', function() {
-      const visible = this.checked;
-      document.querySelectorAll('.schedule-field').forEach(el => el.style.display = visible ? '' : 'none');
-    });
-  }
-
-  // 反检测开关切换
-  const antiToggle = document.getElementById('anti_detect');
-  if (antiToggle) {
-    antiToggle.addEventListener('change', function() {
-      const visible = this.checked;
-      document.querySelectorAll('.anti-field').forEach(el => el.style.display = visible ? '' : 'none');
-    });
-  }
-
-  // 导航切换
-  document.querySelectorAll('.nav-item').forEach(item => {
-    item.addEventListener('click', function() {
-      document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-      document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
-      this.classList.add('active');
-      const target = document.getElementById('panel' + this.dataset.panel.charAt(0).toUpperCase() + this.dataset.panel.slice(1));
-      if (target) target.classList.add('active');
-    });
-  });
-});
 
 function rebuildMessageFiles() {
-  const area = document.getElementById('message-files-area');
-  const text = document.getElementById('target_groups').value;
-  const groups = text.split(/[,，]/).map(s => s.trim()).filter(Boolean);
-
-  // 保留已填写的路径，避免编辑群组时丢失用户输入
-  const existing = {};
-  area.querySelectorAll('input[id^="file_"]').forEach(input => {
-    existing[input.id] = input.value;
-  });
-
+  const container = byId("messageFiles");
+  const groups = byId("target_groups").value.split(/[,，\n]/).map((item) => item.trim()).filter(Boolean);
+  const files = appState.config.message_files || {};
   if (!groups.length) {
-    area.innerHTML = '<p style="color:var(--text-muted);font-size:12px;font-style:italic;">输入目标群组链接后，此处将显示文件路径输入</p>';
+    container.innerHTML = '<div class="empty">请先配置授权群组</div>';
     return;
   }
-  let html = '';
-  for (const g of groups) {
-    const name = g.replace(/\/+$/, '').split('/').pop() || g;
-    const fieldId = 'file_' + name.replace(/[^a-zA-Z0-9]/g, '_');
-    const savedValue = existing[fieldId] ? ` value="${escapeHtml(existing[fieldId])}"` : '';
-    html += '<div class="file-row form-group">';
-    html += `<label for="${fieldId}">消息文件 (${name.substring(0, 20)})</label>`;
-    html += `<input type="text" id="${fieldId}" placeholder="如 messages_${name}.txt"${savedValue}>`;
-    html += '</div>';
-  }
-  area.innerHTML = html;
+  container.innerHTML = "";
+  groups.forEach((group) => {
+    const normalizedGroup = normalizeGroupLink(group);
+    const row = document.createElement("div");
+    row.className = "file-row";
+    const label = document.createElement("span");
+    label.textContent = groupName(group);
+    const input = document.createElement("input");
+    input.dataset.group = normalizedGroup;
+    input.value = files[normalizedGroup] || files[group] || "";
+    input.placeholder = "例如 messages.txt";
+    input.addEventListener("input", markDirty);
+    row.append(label, input);
+    container.append(row);
+  });
 }
 
-function escapeHtml(text) {
-  const div = document.createElement('div');
-  div.textContent = text;
-  return div.innerHTML;
+function toggleConditionalFields() {
+  byId("aiFields").hidden = !byId("ai_enabled").checked;
+  byId("scheduleFields").hidden = !byId("schedule_enabled").checked;
 }
 
 async function loadConfig() {
   try {
-    const resp = await fetch('/api/config');
-    const data = await resp.json();
-    if (!data.success) { showToast(data.error || '加载失败', 'error'); return; }
-    const c = data.config;
-    document.getElementById('api_id').value = c.api_id || '';
-    document.getElementById('api_hash').value = c.api_hash || '';
-    document.getElementById('phone').value = c.phone || '';
-    document.getElementById('target_groups').value = (c.target_groups || []).join(', ');
-    document.getElementById('min_interval').value = c.min_interval || 60;
-    document.getElementById('max_interval').value = c.max_interval || 180;
-    document.getElementById('group_gap_min').value = c.group_gap_min != null ? c.group_gap_min : 1;
-    document.getElementById('group_gap_max').value = c.group_gap_max != null ? c.group_gap_max : 1;
-    document.getElementById('proxy_host').value = c.proxy_host || '';
-    document.getElementById('proxy_port').value = c.proxy_port || '';
-    document.getElementById('proxy_type').value = c.proxy_type || 'http';
-
-    document.getElementById('ai_enabled').checked = c.ai_enabled || false;
-    document.getElementById('ai_api_key').value = c.ai_api_key || '';
-    document.getElementById('ai_base_url').value = c.ai_base_url || '';
-    document.getElementById('ai_model').value = c.ai_model || 'deepseek-chat';
-    document.getElementById('ai_prompt').value = c.ai_prompt || '';
-    document.getElementById('ai_context_count').value = c.ai_context_count || 5;
-    document.getElementById('ai_temperature').value = c.ai_temperature != null ? c.ai_temperature : 0.7;
-    document.getElementById('ai_max_tokens').value = c.ai_max_tokens || 500;
-    document.getElementById('ai_timeout').value = c.ai_timeout || 30;
-    document.getElementById('ai_enabled').dispatchEvent(new Event('change'));
-
-    document.getElementById('schedule_enabled').checked = c.schedule_enabled || false;
-    document.getElementById('schedule_morning_start').value = c.schedule_morning_start || '08:00';
-    document.getElementById('schedule_morning_end').value = c.schedule_morning_end || '11:00';
-    document.getElementById('schedule_afternoon_start').value = c.schedule_afternoon_start || '14:00';
-    document.getElementById('schedule_afternoon_end').value = c.schedule_afternoon_end || '18:00';
-    document.getElementById('schedule_enabled').dispatchEvent(new Event('change'));
-
-    document.getElementById('anti_detect').checked = c.anti_detect || false;
-    document.getElementById('typing_delay_min').value = c.typing_delay_min || 3;
-    document.getElementById('typing_delay_max').value = c.typing_delay_max || 8;
-    document.getElementById('thinking_delay_min').value = c.thinking_delay_min || 5;
-    document.getElementById('thinking_delay_max').value = c.thinking_delay_max || 25;
-    document.getElementById('skip_round_pct').value = c.skip_round_pct || 10;
-    document.getElementById('anti_detect').dispatchEvent(new Event('change'));
-
-    // 消息文件
+    const data = await api("/api/config");
+    const config = data.config;
+    appState.config = config;
+    setInput("api_id", config.api_id);
+    setInput("phone", config.phone);
+    setInput("target_groups", (config.target_groups || []).join("\n"));
+    byId("api_hash").placeholder = config.api_hash_set ? "已保存；留空保持不变" : "请输入 API Hash";
+    byId("ai_api_key").placeholder = config.ai_api_key_set ? "已保存；留空保持不变" : "请输入 API Key";
+    ["daily_limit", "idle_threshold_minutes", "question_reply_pct", "discussion_reply_pct", "reply_delay_min", "reply_delay_max", "ai_base_url", "ai_model", "ai_prompt", "ai_context_count", "ai_temperature", "ai_max_tokens", "proxy_host", "proxy_port", "proxy_type", "schedule_morning_start", "schedule_morning_end", "schedule_afternoon_start", "schedule_afternoon_end"].forEach((id) => setInput(id, config[id]));
+    byId("ai_enabled").checked = Boolean(config.ai_enabled);
+    byId("schedule_enabled").checked = Boolean(config.schedule_enabled);
+    toggleConditionalFields();
     rebuildMessageFiles();
-    if (c.message_files) {
-      for (const [group, path] of Object.entries(c.message_files)) {
-        const name = group.replace(/\/+$/, '').split('/').pop() || group;
-        const fieldId = 'file_' + name.replace(/[^a-zA-Z0-9]/g, '_');
-        const el = document.getElementById(fieldId);
-        if (el) el.value = path;
-      }
-    }
-
-  } catch(e) {
-    showToast('加载失败: ' + e.message, 'error');
+    appState.dirty = false;
+  } catch (error) {
+    showToast(`配置加载失败：${error.message}`, "error");
   }
+}
+
+function validateConfig() {
+  document.querySelectorAll(".field-error").forEach((item) => { item.textContent = ""; });
+  document.querySelectorAll("input.invalid").forEach((item) => item.classList.remove("invalid"));
+  const errors = [];
+  const check = (id, valid, message) => {
+    if (valid) return;
+    const input = byId(id);
+    input.classList.add("invalid");
+    input.closest(".field")?.querySelector(".field-error")?.append(message);
+    errors.push(message);
+  };
+  check("daily_limit", intValue("daily_limit", 0) > 0, "每日上限必须大于 0");
+  check("idle_threshold_minutes", intValue("idle_threshold_minutes", 0) > 0, "冷场阈值必须大于 0");
+  ["question_reply_pct", "discussion_reply_pct"].forEach((id) => check(id, intValue(id, -1) >= 0 && intValue(id, 101) <= 100, "概率必须为 0–100"));
+  check("reply_delay_min", intValue("reply_delay_min", -1) >= 0, "等待时间不能为负数");
+  check("reply_delay_max", intValue("reply_delay_max", -1) >= intValue("reply_delay_min", 0), "上限必须不小于下限");
+  if (!byId("target_groups").value.trim()) errors.push("至少配置一个授权群组");
+  return errors;
+}
+
+function collectConfig() {
+  const messageFiles = {};
+  document.querySelectorAll("#messageFiles input[data-group]").forEach((input) => {
+    if (input.value.trim()) messageFiles[input.dataset.group] = input.value.trim();
+  });
+  return {
+    ...appState.config,
+    api_id: intValue("api_id", 0), api_hash: byId("api_hash").value.trim(), phone: byId("phone").value.trim(),
+    target_groups: byId("target_groups").value.split(/[,，\n]/).map(normalizeGroupLink).filter(Boolean),
+    message_files: messageFiles,
+    daily_limit: intValue("daily_limit", 30), idle_threshold_minutes: intValue("idle_threshold_minutes", 10),
+    question_reply_pct: intValue("question_reply_pct", 70), discussion_reply_pct: intValue("discussion_reply_pct", 15),
+    reply_delay_min: intValue("reply_delay_min", 20), reply_delay_max: intValue("reply_delay_max", 90),
+    ai_enabled: byId("ai_enabled").checked, ai_api_key: byId("ai_api_key").value.trim(), ai_base_url: byId("ai_base_url").value.trim(),
+    ai_model: byId("ai_model").value.trim(), ai_prompt: byId("ai_prompt").value.trim(), ai_context_count: intValue("ai_context_count", 5),
+    ai_temperature: floatValue("ai_temperature", .7), ai_max_tokens: intValue("ai_max_tokens", 500),
+    proxy_host: byId("proxy_host").value.trim(), proxy_port: byId("proxy_port").value ? intValue("proxy_port", null) : null, proxy_type: byId("proxy_type").value,
+    schedule_enabled: byId("schedule_enabled").checked, schedule_morning_start: byId("schedule_morning_start").value.trim(), schedule_morning_end: byId("schedule_morning_end").value.trim(), schedule_afternoon_start: byId("schedule_afternoon_start").value.trim(), schedule_afternoon_end: byId("schedule_afternoon_end").value.trim(),
+  };
 }
 
 async function saveConfig() {
-  // 收集消息文件映射
-  const messageFiles = {};
-  const groups = document.getElementById('target_groups').value.split(/[,，]/).map(s => s.trim()).filter(Boolean);
-  for (const g of groups) {
-    const name = g.replace(/\/+$/, '').split('/').pop() || g;
-    const fieldId = 'file_' + name.replace(/[^a-zA-Z0-9]/g, '_');
-    const el = document.getElementById(fieldId);
-    if (el && el.value.trim()) messageFiles[g] = el.value.trim();
-  }
-
-  const payload = {
-    api_id: parseInt(document.getElementById('api_id').value) || 0,
-    api_hash: document.getElementById('api_hash').value.trim(),
-    phone: document.getElementById('phone').value.trim(),
-    target_groups: groups,
-    min_interval: parseInt(document.getElementById('min_interval').value) || 60,
-    max_interval: parseInt(document.getElementById('max_interval').value) || 180,
-    group_gap_min: parseInt(document.getElementById('group_gap_min').value) || 1,
-    group_gap_max: parseInt(document.getElementById('group_gap_max').value) || 1,
-    proxy_host: document.getElementById('proxy_host').value.trim() || null,
-    proxy_port: document.getElementById('proxy_port').value ? parseInt(document.getElementById('proxy_port').value) : null,
-    proxy_type: document.getElementById('proxy_type').value,
-    message_files: messageFiles,
-    ai_enabled: document.getElementById('ai_enabled').checked,
-    ai_api_key: document.getElementById('ai_api_key').value.trim(),
-    ai_base_url: document.getElementById('ai_base_url').value.trim() || 'https://api.deepseek.com/v1',
-    ai_model: document.getElementById('ai_model').value.trim() || 'deepseek-chat',
-    ai_prompt: document.getElementById('ai_prompt').value.trim(),
-    ai_context_count: parseInt(document.getElementById('ai_context_count').value) || 5,
-    ai_temperature: parseFloat(document.getElementById('ai_temperature').value) || 0.7,
-    ai_max_tokens: parseInt(document.getElementById('ai_max_tokens').value) || 500,
-    ai_timeout: parseInt(document.getElementById('ai_timeout').value) || 30,
-    schedule_enabled: document.getElementById('schedule_enabled').checked,
-    schedule_morning_start: document.getElementById('schedule_morning_start').value.trim(),
-    schedule_morning_end: document.getElementById('schedule_morning_end').value.trim(),
-    schedule_afternoon_start: document.getElementById('schedule_afternoon_start').value.trim(),
-    schedule_afternoon_end: document.getElementById('schedule_afternoon_end').value.trim(),
-    anti_detect: document.getElementById('anti_detect').checked,
-    typing_delay_min: parseInt(document.getElementById('typing_delay_min').value) || 3,
-    typing_delay_max: parseInt(document.getElementById('typing_delay_max').value) || 8,
-    thinking_delay_min: parseInt(document.getElementById('thinking_delay_min').value) || 5,
-    thinking_delay_max: parseInt(document.getElementById('thinking_delay_max').value) || 25,
-    skip_round_pct: parseInt(document.getElementById('skip_round_pct').value) || 10
-  };
-
+  const errors = validateConfig();
+  if (errors.length) { showToast(errors[0], "error"); return; }
   try {
-    const resp = await fetch('/api/config', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(payload)
-    });
-    const data = await resp.json();
-    if (data.success) {
-      showToast('✅ 配置已保存到 .env', 'success');
-    } else {
-      showToast('❌ ' + (data.error || '保存失败'), 'error');
+    await api("/api/config", {method: "POST", body: JSON.stringify(collectConfig())});
+    appState.dirty = false;
+    await loadConfig();
+    await loadDashboard();
+    showToast("配置已保存", "success");
+  } catch (error) {
+    if (error.field) {
+      const input = byId(error.field);
+      input?.classList.add("invalid");
+      input?.closest(".field")?.querySelector(".field-error")?.append(error.message);
     }
-  } catch(e) {
-    showToast('保存失败: ' + e.message, 'error');
+    showToast(`保存失败：${error.message}`, "error");
   }
 }
 
-// ===== Toast =====
-const toastQueue = [];
-let toastShowing = false;
+function markDirty() { appState.dirty = true; }
 
-function showToast(msg, type) {
-  toastQueue.push({msg, type});
-  if (!toastShowing) showNextToast();
+async function control(action) {
+  if ((action === "stop") && !window.confirm("确定停止当前自动参与任务？")) return;
+  try {
+    await api(`/api/${action}`, {method: "POST", body: "{}"});
+    showToast(action === "start" ? "正在启动" : "操作已提交", "success");
+    setTimeout(loadDashboard, 300);
+  } catch (error) { showToast(error.message, "error"); }
 }
 
-function showNextToast() {
-  if (!toastQueue.length) {
-    toastShowing = false;
-    return;
-  }
-  toastShowing = true;
-  const {msg, type} = toastQueue.shift();
-  const toast = document.getElementById('toast');
-  toast.textContent = msg;
-  toast.className = 'toast ' + type + ' show';
-  clearTimeout(toast._hide);
-  toast._hide = setTimeout(() => {
-    toast.classList.remove('show');
-    // 等淡出动画结束再显示下一条（若 CSS 无淡出动画则立即）
-    setTimeout(showNextToast, 150);
-  }, 3000);
+function appendLog(level, message) {
+  const terminal = byId("logTerminal");
+  if (terminal.children.length === 1 && terminal.firstElementChild?.classList.contains("muted")) terminal.innerHTML = "";
+  const line = document.createElement("div");
+  line.className = `log-line ${level}`;
+  const time = document.createElement("span"); time.className = "time"; time.textContent = new Date().toLocaleTimeString("zh-CN", {hour12: false});
+  const tag = document.createElement("span"); tag.className = "level"; tag.textContent = level.toUpperCase();
+  const body = document.createElement("span"); body.textContent = message;
+  line.append(time, tag, body); terminal.append(line); terminal.scrollTop = terminal.scrollHeight;
+  while (terminal.children.length > 500) terminal.firstElementChild.remove();
 }
 
-// ===== 初始化 =====
-document.addEventListener('DOMContentLoaded', function() {
+function connectSSE() {
+  appState.evtSource?.close();
+  const lastId = localStorage.getItem("sse_last_id") || "";
+  appState.evtSource = new EventSource(lastId ? `/api/events?last_event_id=${encodeURIComponent(lastId)}` : "/api/events");
+  appState.evtSource.onopen = () => {
+    byId("offlineBanner").hidden = true; byId("sseState").textContent = "SSE 已连接"; byId("activityConnection").textContent = "已连接";
+  };
+  appState.evtSource.onerror = () => {
+    byId("offlineBanner").hidden = false; byId("sseState").textContent = "SSE 重连中"; byId("activityConnection").textContent = "重连中";
+  };
+  appState.evtSource.onmessage = (event) => {
+    if (event.lastEventId) localStorage.setItem("sse_last_id", event.lastEventId);
+    let payload; try { payload = JSON.parse(event.data); } catch { return; }
+    const data = payload.data || {};
+    if (payload.type === "status") updateStatus(data.state);
+    if (payload.type === "counter") { appState.dashboard.total = data.total; appState.dashboard.per_group = data.per_group; renderDashboard(); }
+    if (payload.type === "countdown") byId("countdownText").textContent = data.seconds > 0 ? `${data.seconds}s` : "--";
+    if (payload.type === "log") appendLog(data.level || "info", data.message || "");
+    if (payload.type === "decision") { const text = `${groupName(data.group)} · ${data.action} · ${data.reason}`; byId("latestDecision").textContent = text; appendLog("decision", text); }
+    if (payload.type === "alert") { appendLog("warning", `${groupName(data.group)} · ${data.message}`); loadDashboard(); }
+    if (payload.type === "group_state") loadDashboard();
+    if (payload.type === "code_required") { byId("codeArea").hidden = false; setView("activity"); byId("codeInput").focus(); }
+  };
+}
+
+async function loadAudit() {
+  try {
+    const data = await api("/api/audit?limit=200");
+    const rows = byId("auditRows");
+    if (!data.events.length) { rows.innerHTML = '<tr><td colspan="5" class="empty">暂无审计记录</td></tr>'; return; }
+    rows.innerHTML = data.events.map((event) => `<tr><td>${escapeHtml(new Date(event.occurred_at).toLocaleString("zh-CN"))}</td><td>${escapeHtml(groupName(event.group))}</td><td>${escapeHtml(event.event_type)}</td><td>${escapeHtml(event.reason)}</td><td></td></tr>`).join("");
+  } catch (error) { showToast(`审计加载失败：${error.message}`, "error"); }
+}
+
+async function resumeGroup(group) {
+  if (!window.confirm(`确认已检查 ${groupName(group)} 的告警并恢复？`)) return;
+  try { await api("/api/groups/resume", {method: "POST", body: JSON.stringify({group})}); await loadDashboard(); await loadAudit(); showToast("群组已恢复", "success"); }
+  catch (error) { showToast(error.message, "error"); }
+}
+
+async function submitCode() {
+  const code = byId("codeInput").value.trim();
+  if (!code) return showToast("请输入验证码", "error");
+  try { await api("/api/code", {method: "POST", body: JSON.stringify({code})}); byId("codeArea").hidden = true; byId("codeInput").value = ""; showToast("验证码已提交", "success"); }
+  catch (error) { showToast(error.message, "error"); }
+}
+
+document.addEventListener("DOMContentLoaded", async () => {
+  document.querySelectorAll(".nav-item").forEach((item) => item.addEventListener("click", () => setView(item.dataset.view)));
+  document.querySelectorAll("[data-go]").forEach((item) => item.addEventListener("click", () => setView(item.dataset.go)));
+  document.querySelectorAll("[data-save]").forEach((item) => item.addEventListener("click", saveConfig));
+  document.querySelectorAll("input, textarea, select").forEach((item) => item.addEventListener("input", markDirty));
+  byId("target_groups").addEventListener("input", rebuildMessageFiles);
+  byId("ai_enabled").addEventListener("change", toggleConditionalFields);
+  byId("schedule_enabled").addEventListener("change", toggleConditionalFields);
+  byId("btnStart").addEventListener("click", () => control("start"));
+  byId("btnPause").addEventListener("click", () => control("pause"));
+  byId("btnResume").addEventListener("click", () => control("resume"));
+  byId("btnStop").addEventListener("click", () => control("stop"));
+  byId("refreshDashboard").addEventListener("click", loadDashboard);
+  byId("refreshAudit").addEventListener("click", loadAudit);
+  byId("clearLog").addEventListener("click", () => { byId("logTerminal").innerHTML = '<div class="log-line muted">视图已清空</div>'; });
+  byId("submitCode").addEventListener("click", submitCode);
+  byId("codeInput").addEventListener("keydown", (event) => { if (event.key === "Enter") submitCode(); });
+  document.addEventListener("click", (event) => { const button = event.target.closest(".resume-group"); if (button) resumeGroup(button.dataset.group); });
+  window.addEventListener("beforeunload", (event) => { if (appState.dirty) { event.preventDefault(); event.returnValue = ""; } });
+  await loadConfig();
+  await loadDashboard();
   connectSSE();
-  // 默认加载配置
-  loadConfig();
+  setInterval(loadDashboard, 30000);
 });

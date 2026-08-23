@@ -124,6 +124,18 @@ class TelegramSender:
             return []
         return await self._client.get_messages(entity, limit=limit)
 
+    async def is_group_admin(self, entity: str, user_id: int) -> bool:
+        """Return whether a message sender currently has admin rights in a group."""
+        if self._client is None or not self._client.is_connected():
+            return False
+        permissions = await self._client.get_permissions(entity, user_id)
+        participant = getattr(permissions, "participant", permissions)
+        return bool(
+            getattr(permissions, "is_admin", False)
+            or getattr(participant, "admin_rights", None)
+            or getattr(participant, "creator", False)
+        )
+
     async def disconnect(self) -> None:
         """断开 Telegram 客户端连接。"""
         if self._client:

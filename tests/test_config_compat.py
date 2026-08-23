@@ -4,7 +4,7 @@ import logging
 
 import pytest
 
-from src.config import Settings, load_settings, save_settings
+from src.config import Settings, SettingsValidationError, load_settings, save_settings, validate_settings_for_save
 
 
 # ── 辅助函数 ──────────────────────────────────────────────────────────
@@ -267,3 +267,96 @@ class TestGroupGap:
         settings = load_settings()
         assert settings.group_gap_min == 5
         assert settings.group_gap_max == 15
+
+
+class TestParticipationSettings:
+    def test_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        set_required_env(monkeypatch)
+        monkeypatch.setenv("TARGET_GROUPS", "https://t.me/a")
+        settings = load_settings()
+        assert settings.daily_limit == 30
+        assert settings.idle_threshold_minutes == 10
+        assert settings.question_reply_pct == 70
+        assert settings.discussion_reply_pct == 15
+        assert (settings.reply_delay_min, settings.reply_delay_max) == (20, 90)
+
+    def test_invalid_probability_is_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        set_required_env(monkeypatch)
+        monkeypatch.setenv("TARGET_GROUPS", "https://t.me/a")
+        monkeypatch.setenv("QUESTION_REPLY_PCT", "101")
+        with pytest.raises(ValueError, match="QUESTION_REPLY_PCT"):
+            load_settings()
+
+    def test_save_writes_participation_settings(self, tmp_path) -> None:
+        env_path = tmp_path / ".env"
+        save_settings(
+            Settings(
+                api_id=1,
+                api_hash="x" * 32,
+                phone="+1",
+                target_groups=["https://t.me/a"],
+                daily_limit=12,
+                idle_threshold_minutes=25,
+                question_reply_pct=80,
+                discussion_reply_pct=5,
+                reply_delay_min=10,
+                reply_delay_max=45,
+            ),
+            str(env_path),
+        )
+        content = env_path.read_text(encoding="utf-8")
+        assert "DAILY_LIMIT=12" in content
+        assert "IDLE_THRESHOLD_MINUTES=25" in content
+        assert "REPLY_DELAY_MAX=45" in content
+
+
+def test_save_settings_explicitly_clears_stale_optional_values(tmp_path) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "AI_ENABLED=true\nSCHEDULE_ENABLED=true\nAI_TEMPERATURE=1.5\n"
+        "PROXY_HOST=127.0.0.1\nPROXY_PORT=7890\n",
+        encoding="utf-8",
+    )
+    save_settings(
+        Settings(
+            api_id=1,
+            api_hash="x" * 32,
+            phone="+1",
+            target_groups=["https://t.me/a"],
+            ai_enabled=False,
+            schedule_enabled=False,
+            proxy_host=None,
+            proxy_port=None,
+        ),
+        str(env_path),
+    )
+    content = env_path.read_text(encoding="utf-8")
+    assert "AI_ENABLED=false" in content
+    assert "SCHEDULE_ENABLED=false" in content
+    assert "AI_TEMPERATURE=0.7" in content
+    assert "PROXY_HOST=" in content
+    assert "PROXY_PORT=" in content
+
+
+def test_validate_settings_for_save_rejects_unstartable_credentials() -> None:
+    settings = Settings(api_id=0, api_hash="", phone="", target_groups=["https://t.me/a"])
+    with pytest.raises(SettingsValidationError, match="API ID"):
+        validate_settings_for_save(settings)
+
+
+def test_save_settings_propagates_atomic_write_failure(monkeypatch, tmp_path) -> None:
+    env_path = tmp_path / ".env"
+    settings = Settings(
+        api_id=1,
+        api_hash="x" * 32,
+        phone="+1",
+        target_groups=["https://t.me/a"],
+    )
+    monkeypatch.setattr(
+        "src.config.os.replace",
+        lambda source, destination: (_ for _ in ()).throw(OSError("disk locked")),
+    )
+    with pytest.raises(OSError, match="disk locked"):
+        save_settings(settings, str(env_path))

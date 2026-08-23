@@ -12,6 +12,10 @@ __pycache__/
 .sisyphus/
 .omo/
 logs/
+state/
+*.db-wal
+*.db-shm
+.superpowers/
 
 # Auto-copied superpowers skills (repo-local skills like grill-me/ and openspec-*/ are tracked)
 .opencode/skills/*/

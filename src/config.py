@@ -4,9 +4,12 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
+from datetime import time
 from pathlib import Path
 
 from dotenv import load_dotenv
+
+from src.group_parser import normalize_group_link
 
 logger = logging.getLogger(__name__)
 
@@ -57,12 +60,97 @@ class Settings:
     group_gap_min: int = 1
     group_gap_max: int = 1
 
+    # 授权群组自动参与策略（所有目标群组共用）
+    daily_limit: int = 30
+    idle_threshold_minutes: int = 10
+    question_reply_pct: int = 70
+    discussion_reply_pct: int = 15
+    reply_delay_min: int = 20
+    reply_delay_max: int = 90
+    state_db_path: str = "state/be_water.db"
+
     def __post_init__(self) -> None:
         """同步 target_group 与 target_groups 以保持向后兼容。"""
+        normalized_groups: list[str] = []
+        for group in self.target_groups:
+            normalized = normalize_group_link(str(group).strip())
+            if normalized and normalized not in normalized_groups:
+                normalized_groups.append(normalized)
+        self.target_groups = normalized_groups
+        if self.target_group:
+            self.target_group = normalize_group_link(self.target_group.strip())
+        self.message_files = {
+            normalize_group_link(str(group).strip()): str(path).strip()
+            for group, path in self.message_files.items()
+            if str(group).strip() and str(path).strip()
+        }
         if self.target_groups and not self.target_group:
             self.target_group = self.target_groups[0]
         elif self.target_group and not self.target_groups:
             self.target_groups = [self.target_group]
+        validate_participation_settings(self)
+
+
+class SettingsValidationError(ValueError):
+    """A configuration error associated with a Web form field."""
+
+    def __init__(self, field: str, message: str) -> None:
+        super().__init__(message)
+        self.field = field
+
+
+def validate_participation_settings(settings: Settings) -> None:
+    """校验自动参与参数，配置文件和 Web API 共用。"""
+    if settings.daily_limit <= 0:
+        raise ValueError("DAILY_LIMIT must be greater than 0")
+    if settings.idle_threshold_minutes <= 0:
+        raise ValueError("IDLE_THRESHOLD_MINUTES must be greater than 0")
+    for name, value in (
+        ("QUESTION_REPLY_PCT", settings.question_reply_pct),
+        ("DISCUSSION_REPLY_PCT", settings.discussion_reply_pct),
+    ):
+        if not 0 <= value <= 100:
+            raise ValueError(f"{name} must be between 0 and 100")
+    if settings.reply_delay_min < 0:
+        raise ValueError("REPLY_DELAY_MIN must be at least 0")
+    if settings.reply_delay_max < settings.reply_delay_min:
+        raise ValueError("REPLY_DELAY_MAX must be >= REPLY_DELAY_MIN")
+    if not settings.state_db_path.strip():
+        raise ValueError("STATE_DB_PATH must not be empty")
+
+
+def validate_settings_for_save(settings: Settings) -> None:
+    """Validate all values needed to persist a configuration that can start."""
+    if settings.api_id <= 0:
+        raise SettingsValidationError("api_id", "API ID must be greater than 0")
+    if not settings.api_hash.strip():
+        raise SettingsValidationError("api_hash", "API Hash is required")
+    if not settings.phone.strip():
+        raise SettingsValidationError("phone", "Phone is required")
+    if not settings.target_groups:
+        raise SettingsValidationError("target_groups", "At least one target group is required")
+    if settings.min_interval <= 0 or settings.max_interval <= settings.min_interval:
+        raise SettingsValidationError("max_interval", "MAX_INTERVAL must be greater than MIN_INTERVAL")
+    if bool(settings.proxy_host) != bool(settings.proxy_port):
+        raise SettingsValidationError("proxy_host", "Proxy host and port must be provided together")
+    if settings.ai_enabled and not settings.ai_api_key.strip():
+        raise SettingsValidationError("ai_api_key", "AI API key is required when AI is enabled")
+    if settings.ai_context_count <= 0:
+        raise SettingsValidationError("ai_context_count", "AI context count must be greater than 0")
+    if not 0 <= settings.ai_temperature <= 2:
+        raise SettingsValidationError("ai_temperature", "AI temperature must be between 0 and 2")
+    if settings.ai_max_tokens <= 0 or settings.ai_timeout <= 0:
+        raise SettingsValidationError("ai_max_tokens", "AI token and timeout values must be positive")
+    if settings.schedule_enabled:
+        try:
+            windows = (
+                (time.fromisoformat(settings.schedule_morning_start), time.fromisoformat(settings.schedule_morning_end)),
+                (time.fromisoformat(settings.schedule_afternoon_start), time.fromisoformat(settings.schedule_afternoon_end)),
+            )
+        except ValueError as exc:
+            raise SettingsValidationError("schedule_morning_start", "Invalid schedule time") from exc
+        if any(start > end for start, end in windows):
+            raise SettingsValidationError("schedule_morning_start", "Schedule start must not be after end")
 
 
 def _parse_legacy_message_file(part: str) -> tuple[str, str]:
@@ -205,6 +293,13 @@ def load_settings() -> Settings:
     skip_round_pct = int(os.getenv("SKIP_ROUND_PCT", "10"))
     group_gap_min = int(os.getenv("GROUP_GAP_MIN", "1"))
     group_gap_max = int(os.getenv("GROUP_GAP_MAX", "1"))
+    daily_limit = int(os.getenv("DAILY_LIMIT", "30"))
+    idle_threshold_minutes = int(os.getenv("IDLE_THRESHOLD_MINUTES", "10"))
+    question_reply_pct = int(os.getenv("QUESTION_REPLY_PCT", "70"))
+    discussion_reply_pct = int(os.getenv("DISCUSSION_REPLY_PCT", "15"))
+    reply_delay_min = int(os.getenv("REPLY_DELAY_MIN", "20"))
+    reply_delay_max = int(os.getenv("REPLY_DELAY_MAX", "90"))
+    state_db_path = os.getenv("STATE_DB_PATH", "state/be_water.db")
 
     if group_gap_max < group_gap_min:
         raise ValueError(
@@ -245,6 +340,13 @@ def load_settings() -> Settings:
         skip_round_pct=skip_round_pct,
         group_gap_min=group_gap_min,
         group_gap_max=group_gap_max,
+        daily_limit=daily_limit,
+        idle_threshold_minutes=idle_threshold_minutes,
+        question_reply_pct=question_reply_pct,
+        discussion_reply_pct=discussion_reply_pct,
+        reply_delay_min=reply_delay_min,
+        reply_delay_max=reply_delay_max,
+        state_db_path=state_db_path,
     )
 
 
@@ -265,54 +367,42 @@ def save_settings(settings: Settings, path: str | None = None) -> None:
     new_values["PHONE"] = settings.phone
     new_values["MIN_INTERVAL"] = str(settings.min_interval)
     new_values["MAX_INTERVAL"] = str(settings.max_interval)
-    if settings.proxy_host is not None:
-        new_values["PROXY_HOST"] = settings.proxy_host
-    if settings.proxy_port is not None:
-        new_values["PROXY_PORT"] = str(settings.proxy_port)
-    if settings.proxy_type != "http":
-        new_values["PROXY_TYPE"] = settings.proxy_type
-    if settings.message_files:
-        new_values["MESSAGE_FILES"] = ",".join(
-            f"{g}|{p}" for g, p in settings.message_files.items()
-        )
-    if settings.ai_enabled:
-        new_values["AI_ENABLED"] = "true"
-    if settings.ai_api_key:
-        new_values["AI_API_KEY"] = settings.ai_api_key
+    new_values["PROXY_HOST"] = settings.proxy_host or ""
+    new_values["PROXY_PORT"] = str(settings.proxy_port) if settings.proxy_port else ""
+    new_values["PROXY_TYPE"] = settings.proxy_type
+    new_values["MESSAGE_FILES"] = ",".join(
+        f"{g}|{p}" for g, p in settings.message_files.items()
+    )
+    new_values["AI_ENABLED"] = "true" if settings.ai_enabled else "false"
+    new_values["AI_API_KEY"] = settings.ai_api_key
     new_values["AI_BASE_URL"] = settings.ai_base_url
     new_values["AI_MODEL"] = settings.ai_model
-    if settings.ai_prompt:
-        new_values["AI_PROMPT"] = settings.ai_prompt
+    new_values["AI_PROMPT"] = settings.ai_prompt
     new_values["AI_CONTEXT_COUNT"] = str(settings.ai_context_count)
-    if settings.ai_temperature != 0.7:
-        new_values["AI_TEMPERATURE"] = str(settings.ai_temperature)
-    if settings.ai_max_tokens != 500:
-        new_values["AI_MAX_TOKENS"] = str(settings.ai_max_tokens)
-    if settings.ai_timeout != 30:
-        new_values["AI_TIMEOUT"] = str(settings.ai_timeout)
+    new_values["AI_TEMPERATURE"] = str(settings.ai_temperature)
+    new_values["AI_MAX_TOKENS"] = str(settings.ai_max_tokens)
+    new_values["AI_TIMEOUT"] = str(settings.ai_timeout)
 
-    if settings.schedule_enabled:
-        new_values["SCHEDULE_ENABLED"] = "true"
+    new_values["SCHEDULE_ENABLED"] = "true" if settings.schedule_enabled else "false"
     new_values["SCHEDULE_MORNING_START"] = settings.schedule_morning_start
     new_values["SCHEDULE_MORNING_END"] = settings.schedule_morning_end
     new_values["SCHEDULE_AFTERNOON_START"] = settings.schedule_afternoon_start
     new_values["SCHEDULE_AFTERNOON_END"] = settings.schedule_afternoon_end
-    if settings.anti_detect:
-        new_values["ANTI_DETECT"] = "true"
-    if settings.typing_delay_min != 3:
-        new_values["TYPING_DELAY_MIN"] = str(settings.typing_delay_min)
-    if settings.typing_delay_max != 8:
-        new_values["TYPING_DELAY_MAX"] = str(settings.typing_delay_max)
-    if settings.thinking_delay_min != 5:
-        new_values["THINKING_DELAY_MIN"] = str(settings.thinking_delay_min)
-    if settings.thinking_delay_max != 25:
-        new_values["THINKING_DELAY_MAX"] = str(settings.thinking_delay_max)
-    if settings.skip_round_pct != 10:
-        new_values["SKIP_ROUND_PCT"] = str(settings.skip_round_pct)
-    if settings.group_gap_min != 1:
-        new_values["GROUP_GAP_MIN"] = str(settings.group_gap_min)
-    if settings.group_gap_max != 1:
-        new_values["GROUP_GAP_MAX"] = str(settings.group_gap_max)
+    new_values["ANTI_DETECT"] = "true" if settings.anti_detect else "false"
+    new_values["TYPING_DELAY_MIN"] = str(settings.typing_delay_min)
+    new_values["TYPING_DELAY_MAX"] = str(settings.typing_delay_max)
+    new_values["THINKING_DELAY_MIN"] = str(settings.thinking_delay_min)
+    new_values["THINKING_DELAY_MAX"] = str(settings.thinking_delay_max)
+    new_values["SKIP_ROUND_PCT"] = str(settings.skip_round_pct)
+    new_values["GROUP_GAP_MIN"] = str(settings.group_gap_min)
+    new_values["GROUP_GAP_MAX"] = str(settings.group_gap_max)
+    new_values["DAILY_LIMIT"] = str(settings.daily_limit)
+    new_values["IDLE_THRESHOLD_MINUTES"] = str(settings.idle_threshold_minutes)
+    new_values["QUESTION_REPLY_PCT"] = str(settings.question_reply_pct)
+    new_values["DISCUSSION_REPLY_PCT"] = str(settings.discussion_reply_pct)
+    new_values["REPLY_DELAY_MIN"] = str(settings.reply_delay_min)
+    new_values["REPLY_DELAY_MAX"] = str(settings.reply_delay_max)
+    new_values["STATE_DB_PATH"] = settings.state_db_path
 
     env_path = Path(path)
     lines: list[str] = []
@@ -371,9 +461,16 @@ def save_settings(settings: Settings, path: str | None = None) -> None:
         if key not in seen_keys:
             output_lines.append(f"{key}={value}\n")
 
-    # 写入文件，失败时仅记录日志
+    # 先写入同目录临时文件，再原子替换；失败必须通知调用者。
+    temp_path = env_path.with_suffix(f"{env_path.suffix}.tmp")
     try:
-        with open(env_path, "w", encoding="utf-8") as f:
+        with open(temp_path, "w", encoding="utf-8") as f:
             f.writelines(output_lines)
+        os.replace(temp_path, env_path)
     except OSError as e:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
         logger.error("写入 .env 文件失败 (%s): %s", path, e)
+        raise

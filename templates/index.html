@@ -1,236 +1,48 @@
-﻿{% extends "base.html" %}
-
-{% block config_panel %}
-<h2 class="panel-title">配置</h2>
-
-<form id="configForm" onsubmit="return false;">
-  <!-- 基础配置 -->
-  <details class="config-section" open>
-    <summary>🔑 基础配置</summary>
-    <div class="section-body">
-      <div class="form-row">
-        <div class="form-group">
-          <label for="api_id">API ID</label>
-          <input type="text" id="api_id" placeholder="从 my.telegram.org 获取">
-        </div>
-        <div class="form-group">
-          <label for="api_hash">API Hash</label>
-          <input type="password" id="api_hash" placeholder="从 my.telegram.org 获取">
-        </div>
-      </div>
-      <div class="form-group">
-        <label for="phone">手机号</label>
-        <input type="text" id="phone" placeholder="+8613800138000">
-      </div>
-      <div class="form-group">
-        <label for="target_groups">目标群组</label>
-        <textarea id="target_groups" rows="2" placeholder="逗号分隔。如: https://t.me/group1, https://t.me/group2"></textarea>
-      </div>
-    </div>
-  </details>
-
-  <!-- 发送设置 -->
-  <details class="config-section" open>
-    <summary>⚡ 发送设置</summary>
-    <div class="section-body">
-      <div class="form-row">
-        <div class="form-group">
-          <label for="min_interval">最小间隔（秒）</label>
-          <input type="number" id="min_interval" value="20">
-        </div>
-        <div class="form-group">
-          <label for="max_interval">最大间隔（秒）</label>
-          <input type="number" id="max_interval" value="30">
-        </div>
-      </div>
-      <div class="form-row">
-        <div class="form-group">
-          <label for="group_gap_min">群组间隔下限（秒）</label>
-          <input type="number" id="group_gap_min" value="1" min="0" max="3600">
-        </div>
-        <div class="form-group">
-          <label for="group_gap_max">群组间隔上限（秒）</label>
-          <input type="number" id="group_gap_max" value="1" min="0" max="3600">
-        </div>
-      </div>
-      <div class="form-row">
-        <div class="form-group">
-          <label for="proxy_host">代理地址（可选）</label>
-          <input type="text" id="proxy_host" placeholder="127.0.0.1">
-        </div>
-        <div class="form-group">
-          <label for="proxy_port">代理端口（可选）</label>
-          <input type="number" id="proxy_port" placeholder="7890">
-        </div>
-      </div>
-      <div class="form-group">
-        <label for="proxy_type">代理类型</label>
-        <select id="proxy_type">
-          <option value="http">HTTP</option>
-          <option value="socks5">SOCKS5</option>
-          <option value="socks4">SOCKS4</option>
-        </select>
-      </div>
-    </div>
-  </details>
-
-  <!-- AI 配置 -->
-  <details class="config-section">
-    <summary>🤖 AI 智能聊天</summary>
-    <div class="section-body">
-      <div class="switch-row">
-        <label class="toggle">
-          <input type="checkbox" id="ai_enabled">
-          <span class="slider"></span>
-        </label>
-        <span class="toggle-label">AI 智能聊天模式</span>
-      </div>
-      <div class="form-group ai-field" style="display:none">
-        <label for="ai_api_key">AI API Key</label>
-        <input type="password" id="ai_api_key" placeholder="sk-your-api-key">
-      </div>
-      <div class="form-row ai-field" style="display:none">
-        <div class="form-group">
-          <label for="ai_base_url">AI Base URL</label>
-          <input type="text" id="ai_base_url" value="https://api.deepseek.com/v1">
-        </div>
-        <div class="form-group">
-          <label for="ai_model">AI 模型</label>
-          <input type="text" id="ai_model" value="deepseek-chat">
-        </div>
-      </div>
-      <div class="form-group ai-field" style="display:none">
-        <label for="ai_prompt">AI 系统提示词 (System Prompt)</label>
-        <textarea id="ai_prompt" rows="3"></textarea>
-      </div>
-      <div class="form-group ai-field" style="display:none">
-        <label for="ai_context_count">上下文消息数</label>
-        <input type="number" id="ai_context_count" value="5" min="1" max="20">
-      </div>
-      <div class="form-row ai-field" style="display:none">
-        <div class="form-group">
-          <label for="ai_temperature">AI 温度 (0-2)</label>
-          <input type="number" id="ai_temperature" step="0.1" min="0" max="2" value="0.7">
-        </div>
-        <div class="form-group">
-          <label for="ai_max_tokens">最大 Token</label>
-          <input type="number" id="ai_max_tokens" value="500" min="1" max="4096">
-        </div>
-      </div>
-      <div class="form-group ai-field" style="display:none">
-        <label for="ai_timeout">请求超时（秒）</label>
-        <input type="number" id="ai_timeout" value="30" min="5" max="120">
-      </div>
-    </div>
-  </details>
-
-  <!-- 定时运行 -->
-  <details class="config-section">
-    <summary>⏰ 定时运行</summary>
-    <div class="section-body">
-      <div class="switch-row">
-        <label class="toggle">
-          <input type="checkbox" id="schedule_enabled">
-          <span class="slider"></span>
-        </label>
-        <span class="toggle-label">定时运行窗口</span>
-      </div>
-      <div class="form-row schedule-field" style="display:none">
-        <div class="form-group">
-          <label for="schedule_morning_start">上午开始</label>
-          <input type="text" id="schedule_morning_start" value="08:00" placeholder="hh:mm">
-        </div>
-        <div class="form-group">
-          <label for="schedule_morning_end">上午结束</label>
-          <input type="text" id="schedule_morning_end" value="11:00" placeholder="hh:mm">
-        </div>
-      </div>
-      <div class="form-row schedule-field" style="display:none">
-        <div class="form-group">
-          <label for="schedule_afternoon_start">下午开始</label>
-          <input type="text" id="schedule_afternoon_start" value="14:00" placeholder="hh:mm">
-        </div>
-        <div class="form-group">
-          <label for="schedule_afternoon_end">下午结束</label>
-          <input type="text" id="schedule_afternoon_end" value="18:00" placeholder="hh:mm">
-        </div>
-      </div>
-    </div>
-  </details>
-
-  <!-- 反检测增强 -->
-  <details class="config-section">
-    <summary>🛡️ 反检测增强</summary>
-    <div class="section-body">
-      <div class="switch-row">
-        <label class="toggle">
-          <input type="checkbox" id="anti_detect">
-          <span class="slider"></span>
-        </label>
-        <span class="toggle-label">真人行为模拟（打字延迟、思考间隔、随机潜水）</span>
-      </div>
-      <div class="form-row anti-field" style="display:none">
-        <div class="form-group">
-          <label for="typing_delay_min">打字最短（秒）</label>
-          <input type="number" id="typing_delay_min" value="3">
-        </div>
-        <div class="form-group">
-          <label for="typing_delay_max">打字最长（秒）</label>
-          <input type="number" id="typing_delay_max" value="8">
-        </div>
-      </div>
-      <div class="form-row anti-field" style="display:none">
-        <div class="form-group">
-          <label for="thinking_delay_min">思考最短（秒）</label>
-          <input type="number" id="thinking_delay_min" value="5">
-        </div>
-        <div class="form-group">
-          <label for="thinking_delay_max">思考最长（秒）</label>
-          <input type="number" id="thinking_delay_max" value="25">
-        </div>
-      </div>
-      <div class="form-group anti-field" style="display:none">
-        <label for="skip_round_pct">潜水概率（%）</label>
-        <input type="number" id="skip_round_pct" value="10" min="0" max="100">
-      </div>
-    </div>
-  </details>
-
-  <!-- 消息文件 -->
-  <details class="config-section">
-    <summary>📄 消息文件</summary>
-    <div class="section-body">
-      <p style="color:var(--text-secondary);font-size:12px;margin-bottom:12px;">每个群组单独指定消息内容文件路径</p>
-      <div id="message-files-area">
-        <p style="color:var(--text-muted);font-size:12px;font-style:italic;">输入目标群组链接后，此处将显示文件路径输入</p>
-      </div>
-    </div>
-  </details>
-
-  <div class="form-actions">
-    <button type="button" class="btn btn-secondary" onclick="loadConfig()">📂 加载配置</button>
-    <button type="button" class="btn btn-primary" onclick="saveConfig()">💾 保存配置</button>
+{% extends "base.html" %}
+{% block content %}
+<section class="view active" id="viewOverview">
+  <header class="page-header"><div><p class="eyebrow">OPERATION CENTER</p><h1>运行概览</h1><p class="page-subtitle">查看授权群组的参与状态、额度和自动决策。</p></div><button class="button ghost" id="refreshDashboard">刷新</button></header>
+  <div class="metric-grid">
+    <article class="metric-card"><span>今日发送</span><strong id="metricTotal">0</strong><small id="metricLimit">全局累计</small></article>
+    <article class="metric-card"><span>观察中</span><strong id="metricWatching">0</strong><small>正常参与策略</small></article>
+    <article class="metric-card warning"><span>已暂停</span><strong id="metricPaused">0</strong><small>需要检查或等待重置</small></article>
+    <article class="metric-card"><span>下一候选</span><strong id="countdownText">--</strong><small>发送前会再次校验</small></article>
   </div>
-  <div class="form-status" id="configStatus"></div>
-</form>
-{% endblock %}
-
-{% block log_panel %}
-<h2 class="panel-title">运行日志</h2>
-
-<div class="log-header" id="logHeader">
-  <span class="counter-item">总计: <strong id="totalCountDetail">0</strong> 条</span>
-  <span id="perGroupCounts"></span>
-</div>
-
-<div class="log-terminal" id="logTerminal">
-  <span class="log-entry">等待启动...</span>
-</div>
-
-<div class="code-area" id="codeArea">
-  <div class="code-row">
-    <input type="text" id="codeInput" placeholder="请输入 Telegram 验证码..." autocomplete="off">
-    <button class="btn btn-code" onclick="submitCode()">提交</button>
+  <div class="dashboard-grid">
+    <article class="card wide"><div class="card-heading"><div><h2>群组状态</h2><p>每个群组独立计数和停发</p></div><button class="text-button" data-go="groups">管理群组 →</button></div><div class="table-wrap"><table><thead><tr><th>群组</th><th>状态</th><th>今日</th><th>最近决策</th></tr></thead><tbody id="overviewGroupRows"><tr><td colspan="4" class="empty">尚未加载状态</td></tr></tbody></table></div></article>
+    <article class="card"><div class="card-heading"><div><h2>需要处理</h2><p>严重告警需人工恢复</p></div></div><div id="alertList" class="alert-list"><div class="empty">暂无告警</div></div></article>
   </div>
-</div>
+  <article class="live-strip"><span class="live-dot"></span><code id="latestDecision">等待运行事件…</code><span id="sseState">SSE 连接中</span></article>
+</section>
+
+<section class="view" id="viewGroups">
+  <header class="page-header"><div><p class="eyebrow">AUTHORIZED SCOPE</p><h1>授权群组</h1><p class="page-subtitle">仅添加已获得管理员明确许可的 Telegram 群组链接。</p></div></header>
+  <article class="card form-card"><label for="target_groups">群组链接（逗号或换行分隔）</label><textarea id="target_groups" rows="8" placeholder="https://t.me/group1&#10;https://t.me/group2"></textarea><p class="field-help">系统不会自动发现、加入或向列表外的群组发送消息。</p><div class="form-actions"><button class="button primary" data-save>保存授权范围</button></div></article>
+</section>
+
+<section class="view" id="viewStrategy">
+  <header class="page-header"><div><p class="eyebrow">PARTICIPATION POLICY</p><h1>参与策略</h1><p class="page-subtitle">所有授权群组共用以下参数。</p></div></header>
+  <article class="card form-card"><div class="form-grid three"><div class="field"><label for="daily_limit">每群每日上限</label><input id="daily_limit" type="number" min="1" value="30"><span class="field-error"></span></div><div class="field"><label for="idle_threshold_minutes">冷场阈值（分钟）</label><input id="idle_threshold_minutes" type="number" min="1" value="10"><span class="field-error"></span></div><div class="field"><label>模式</label><div class="read-only">混合：问题优先 + 冷场参与</div></div></div><hr><div class="form-grid two"><div class="field"><label for="question_reply_pct">问题参与概率（%）</label><input id="question_reply_pct" type="number" min="0" max="100" value="70"><span class="field-error"></span></div><div class="field"><label for="discussion_reply_pct">普通讨论概率（%）</label><input id="discussion_reply_pct" type="number" min="0" max="100" value="15"><span class="field-error"></span></div></div><div class="form-grid two"><div class="field"><label for="reply_delay_min">等待下限（秒）</label><input id="reply_delay_min" type="number" min="0" value="20"><span class="field-error"></span></div><div class="field"><label for="reply_delay_max">等待上限（秒）</label><input id="reply_delay_max" type="number" min="0" value="90"><span class="field-error"></span></div></div><div class="notice"><strong>发送前重新校验</strong><span>等待期间若额度耗尽、出现投诉或全局暂停，本次候选会自动取消。</span></div><div class="form-actions"><button class="button primary" data-save>保存参与策略</button></div></article>
+</section>
+
+<section class="view" id="viewGenerator">
+  <header class="page-header"><div><p class="eyebrow">CONTENT PIPELINE</p><h1>AI 与 TXT</h1><p class="page-subtitle">AI 根据最近上下文生成；不可用时降级到 TXT。</p></div></header>
+  <article class="card form-card"><label class="switch-line"><input type="checkbox" id="ai_enabled"><span class="switch"></span><span><strong>启用 AI 上下文生成</strong><small>关闭后只使用 TXT 消息库</small></span></label><div id="aiFields"><div class="form-grid two"><div class="field"><label for="ai_api_key">API Key</label><input id="ai_api_key" type="password" placeholder="留空则保留已保存值"></div><div class="field"><label for="ai_model">模型</label><input id="ai_model" value="deepseek-chat"></div></div><div class="field"><label for="ai_base_url">Base URL</label><input id="ai_base_url" value="https://api.deepseek.com/v1"></div><div class="field"><label for="ai_prompt">系统提示词</label><textarea id="ai_prompt" rows="5" placeholder="说明普通群友的语气、群聊主题和禁止虚构的内容"></textarea></div><div class="form-grid three"><div class="field"><label for="ai_context_count">上下文条数</label><input id="ai_context_count" type="number" min="1" max="20" value="5"></div><div class="field"><label for="ai_temperature">温度</label><input id="ai_temperature" type="number" min="0" max="2" step="0.1" value="0.7"></div><div class="field"><label for="ai_max_tokens">最大 Token</label><input id="ai_max_tokens" type="number" min="1" max="4096" value="500"></div></div></div><hr><div class="card-heading"><div><h2>TXT 兜底文件</h2><p>每个授权群组可指定一个消息文件</p></div></div><div id="messageFiles" class="file-list"><div class="empty">请先配置授权群组</div></div><div class="form-actions"><button class="button primary" data-save>保存生成设置</button></div></article>
+</section>
+
+<section class="view" id="viewActivity">
+  <header class="page-header"><div><p class="eyebrow">LIVE ACTIVITY</p><h1>实时动态</h1><p class="page-subtitle">观察候选、跳过原因、等待和发送结果。</p></div><button class="button ghost" id="clearLog">清空视图</button></header>
+  <article class="terminal-card"><div class="terminal-head"><span><i></i>实时事件流</span><strong id="activityConnection">连接中</strong></div><div class="terminal" id="logTerminal"><div class="log-line muted">等待事件…</div></div></article>
+  <article class="code-card" id="codeArea" hidden><div><h2>需要 Telegram 验证码</h2><p>验证码只提交给当前本地会话。</p></div><div class="code-row"><input id="codeInput" autocomplete="one-time-code" placeholder="输入验证码"><button class="button primary" id="submitCode">提交</button></div></article>
+</section>
+
+<section class="view" id="viewAudit">
+  <header class="page-header"><div><p class="eyebrow">SAFETY & AUDIT</p><h1>安全与审计</h1><p class="page-subtitle">查看自动决策、停发原因并人工恢复严重告警。</p></div><button class="button ghost" id="refreshAudit">刷新</button></header>
+  <article class="card"><div class="table-wrap"><table><thead><tr><th>时间</th><th>群组</th><th>事件</th><th>原因</th><th>操作</th></tr></thead><tbody id="auditRows"><tr><td colspan="5" class="empty">暂无审计记录</td></tr></tbody></table></div></article>
+</section>
+
+<section class="view" id="viewSystem">
+  <header class="page-header"><div><p class="eyebrow">SYSTEM SETTINGS</p><h1>系统设置</h1><p class="page-subtitle">Telegram 凭据、代理和工作时段。</p></div></header>
+  <article class="card form-card"><h2>Telegram 凭据</h2><div class="form-grid two"><div class="field"><label for="api_id">API ID</label><input id="api_id" inputmode="numeric"></div><div class="field"><label for="api_hash">API Hash</label><input id="api_hash" type="password" placeholder="留空则保留已保存值"></div></div><div class="field"><label for="phone">手机号</label><input id="phone" placeholder="+8613800138000"></div><hr><h2>代理</h2><div class="form-grid three"><div class="field"><label for="proxy_host">地址</label><input id="proxy_host" placeholder="可选"></div><div class="field"><label for="proxy_port">端口</label><input id="proxy_port" type="number" placeholder="7890"></div><div class="field"><label for="proxy_type">类型</label><select id="proxy_type"><option value="http">HTTP</option><option value="socks5">SOCKS5</option><option value="socks4">SOCKS4</option></select></div></div><hr><label class="switch-line"><input type="checkbox" id="schedule_enabled"><span class="switch"></span><span><strong>限制工作时段</strong><small>时段外只观察，不发送</small></span></label><div id="scheduleFields" class="form-grid four"><div class="field"><label for="schedule_morning_start">上午开始</label><input id="schedule_morning_start" value="08:00"></div><div class="field"><label for="schedule_morning_end">上午结束</label><input id="schedule_morning_end" value="11:00"></div><div class="field"><label for="schedule_afternoon_start">下午开始</label><input id="schedule_afternoon_start" value="14:00"></div><div class="field"><label for="schedule_afternoon_end">下午结束</label><input id="schedule_afternoon_end" value="18:00"></div></div><div class="form-actions"><button class="button primary" data-save>保存系统设置</button></div></article>
+</section>
 {% endblock %}

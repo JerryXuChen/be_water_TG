@@ -1,225 +1,102 @@
-# Telegram Auto-Sender / Telegram 灌水工具
+# Be Water TG
 
-[![Python](https://img.shields.io/badge/Python-3.13-blue)](https://www.python.org/)
-[![Flet](https://img.shields.io/badge/Flet-0.85-orange)](https://flet.dev/)
-[![Telethon](https://img.shields.io/badge/Telethon-1.43-purple)](https://github.com/LonamiWebs/Telethon)
-[![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
-[![AI](https://img.shields.io/badge/AI-DeepSeek-brightgreen)](https://deepseek.com)
+面向**已获得管理员明确许可的 Telegram 群组**的低打扰自动参与工具。项目使用 Flask 提供桌面 Web 控制台，Telethon 负责 Telegram 连接，并支持基于群聊上下文的 AI 生成与 TXT 消息兜底。
 
-基于 Flet + Telethon 的 Telegram 多群组智能灌水工具。支持 TXT 随机选句 / AI 深度聊天两种模式，内置真人行为模拟引擎，最大程度降低风控风险。
+本项目不用于隐藏自动化身份、绕过 Telegram 风控、自动加入群组或向未授权群组发送消息。
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Platform-Windows-blue?logo=windows" alt="Windows">
-  <img src="https://img.shields.io/badge/GUI-Flet_Tabs-blueviolet" alt="Flet">
-  <img src="https://img.shields.io/badge/API-User_Account-blue?logo=telegram" alt="TG">
-  <img src="https://img.shields.io/badge/Proxy-HTTP/SOCKS5-orange" alt="Proxy">
-</p>
+## 主要能力
 
----
+- 混合参与：优先回应新问题，普通讨论按较低概率参与，冷场后有限度地主动发言。
+- 全局策略：每日上限、冷场阈值、问题/讨论概率和发送前等待均可在前端配置。
+- 安全停发：检测到明确投诉或管理员警告时暂停该群，等待人工检查。
+- 持久化：SQLite 保存每群每日计数、暂停原因和审计事件，重启不会清零额度。
+- 崩溃恢复：启动时清理未完成的发送预留，但保留已占用额度，避免重复发送或群组永久卡住。
+- 内容降级：AI 失败时使用对应群组的 TXT 消息文件；两者都不可用时跳过。
+- 语义分类：AI 可用时区分问题、讨论与不相关消息；不可用时采用保守的本地规则。
+- 深色控制台：概览、授权群组、参与策略、AI/TXT、实时动态、安全审计和系统设置。
+- 稳定运行：暂停/恢复/停止状态机、可中断等待、FloodWait 全局冷却和 SSE 断线重连。
 
-## ✨ 功能
+## 环境与安装
 
-### 🎛 发送模式
-| 模式 | 说明 |
-|------|------|
-| **TXT 随机选句** | 逗号分隔文本文件，随机抽取，避免连续重复 |
-| **🤖 AI 智能聊天** | 读取群聊上下文 → DeepSeek API 生成真人式回复 |
-
-### 🕵️ 真人行为模拟
-| 功能 | 描述 |
-|------|------|
-| 打字模拟 | 发送前先显示"正在输入..." 3-8s |
-| 思考延迟 | 每轮开始前随机等待 5-25s |
-| 潜水回合 | 随机概率整轮跳过不发言 |
-| 消息长度波动 | AI 回复偶尔截短，避免固定风格 |
-| Emoji 尾巴 | AI 回复 30% 概率随机追加表情 |
-| 定时窗口 | 自定义工作时间段，之外自动暂停 |
-| 🤖 AI 去重 | 上条消息仍在上下文时自动跳过 |
-
-### 🛡 稳定可靠
-- 状态机驱动 — 启动/暂停/恢复/停止，暂停后自动完成当前轮次
-- 停止确认对话框，防误触
-- 发送计数 + 群组计数 + 倒计时实时显示
-- 3 次重试 + 指数退避，AI 失败自动回退 TXT
-- FloodWait 自动等待，代理支持 HTTP/SOCKS5
-
----
-
-## 🚀 快速开始
-
-### 环境
+- Windows
 - Python 3.12+
-- Telegram 用户账号
-- [api_id / api_hash](https://my.telegram.org)
+- Telegram 用户账号及 [api_id / api_hash](https://my.telegram.org)
 
-### 安装
-
-```bash
-git clone https://github.com/yourname/be_water_TG
-cd be_water_TG
+```powershell
 conda create -n be_water python=3.13 -y
 conda activate be_water
 pip install -r requirements.txt
+Copy-Item .env.example .env
 ```
 
-### 配置
-
-```bash
-cp .env.example .env
-```
+编辑 `.env`，至少填写：
 
 ```env
-# 必填
 API_ID=12345
-API_HASH=abc123def456
+API_HASH=your_api_hash
 PHONE=+8613800138000
-TARGET_GROUPS=https://t.me/group1, https://t.me/group2
-MIN_INTERVAL=20
-MAX_INTERVAL=30
-
-# 可选：代理
-PROXY_HOST=127.0.0.1
-PROXY_PORT=7890
-PROXY_TYPE=http          # http 或 socks5
-
-# 可选：消息文件
-MESSAGE_FILES=https://t.me/group1|messages.txt
-
-# 可选：AI 模式
-AI_ENABLED=true
-AI_API_KEY=sk-your-key
-AI_BASE_URL=https://api.deepseek.com/v1
-AI_MODEL=deepseek-chat
-AI_PROMPT=你是普通群聊参与者，请根据上下文自然回复
-AI_CONTEXT_COUNT=5
-
-# 可选：定时窗口
-SCHEDULE_ENABLED=false
-SCHEDULE_MORNING_START=08:00
-SCHEDULE_MORNING_END=11:00
-SCHEDULE_AFTERNOON_START=14:00
-SCHEDULE_AFTERNOON_END=18:00
-
-# 可选：反检测增强
-ANTI_DETECT=false
-TYPING_DELAY_MIN=3
-TYPING_DELAY_MAX=8
-THINKING_DELAY_MIN=5
-THINKING_DELAY_MAX=25
-SKIP_ROUND_PCT=10
+TARGET_GROUPS=https://t.me/authorized_group1,https://t.me/authorized_group2
 ```
 
-### 运行
+所有 `TARGET_GROUPS` 条目都应事先得到群组管理员许可。
 
-```bash
-python main.py          # 桌面 GUI
-python main.py --web    # 浏览器模式
+## 运行
+
+```powershell
+python main.py
 ```
 
----
+浏览器访问 <http://127.0.0.1:5000>。首次连接 Telegram 时，控制台会显示验证码输入区域。`run.bat` 也可以启动服务，但其中的 Python 路径可能需要按本机环境调整。
 
-## 📁 项目结构
+## 自动参与默认值
 
-```
-be_water_TG/
-├── main.py
-├── run.bat
-├── requirements.txt
-├── .env.example
-│
-├── src/                       # 核心
-│   ├── config.py              # Settings + .env 读写
-│   ├── sender.py              # Telethon 客户端
-│   ├── ai_client.py           # DeepSeek SDK 封装
-│   ├── ai_sender.py           # 上下文 + 记忆 + 去重
-│   ├── message_loader.py      # 文件解析
-│   ├── selector.py            # 随机选句
-│   ├── interval.py            # 间隔 + 时间格式化
-│   ├── group_parser.py        # 链接解析
-│   └── logger.py              # 日志
-│
-├── ui/                        # Flet GUI
-│   ├── app.py                 # 主窗口 + 桥接
-│   ├── config_form.py         # 配置表单
-│   ├── control_panel.py       # 按钮 + 状态机
-│   ├── status_panel.py        # 日志 + 计数 + 倒计时
-│   ├── send_loop.py           # 发送主循环
-│   └── message_manager.py     # 消息选择器
-│
-└── tests/                     # 66 条测试
-    ├── test_config_compat.py
-    ├── test_group_parser.py
-    ├── test_interval.py
-    ├── test_message_loader.py
-    ├── test_selector.py
-    ├── test_control_panel.py
-    └── test_ai_client.py
+| 配置 | 默认值 |
+|---|---:|
+| 每群每日上限 | 30 条 |
+| 冷场阈值 | 10 分钟 |
+| 明确问题参与概率 | 70% |
+| 普通讨论参与概率 | 15% |
+| 发送前等待 | 20–90 秒 |
+
+等待结束后系统会重新检查额度、暂停状态和安全规则。若本账号上一条消息仍是群中最后一条消息，冷场模式不会再次主动发送。
+
+## 安全与恢复规则
+
+- 每群管理员权限只查询本轮新增消息的唯一发送者，并使用短期缓存；权限查询触发 `FloodWait` 时进入全局冷却。
+- “别发了”等明确投诉，以及直接指向本账号的“你太刷屏了”或回复本人消息的投诉，会立即暂停该群；旁观性提及只写入审计。
+- 本账号消息连续两个完整冷场窗口无人回应时，该群暂停至次日，避免在无人互动时继续主动发言。
+- TXT 文件映射与目标群组使用相同的标准化键，`@group`、`t.me/group` 和完整链接会对应同一群组。
+- 候选内容只有在 Telegram 发送成功且配额确认成功后才写入重复检测和 AI 自身历史；取消或失败的候选不会污染后续生成。
+- 崩溃时无法确认发送结果的预留额度不会退还；下次启动会清除“处理中”标记并写入恢复审计。
+
+## 项目结构
+
+```text
+main.py / web_app.py / web_manager.py  Flask、API、SSE 与后台任务
+src/activity_observer.py              新消息和冷场观察
+src/participation_policy.py           概率、额度与二次校验
+src/safety_guard.py                   投诉和管理员警告保护
+src/message_generator.py              AI 优先、TXT 兜底
+src/state_store.py                    SQLite 状态与审计
+src/sender.py / src/ai_sender.py      Telegram 与 AI 适配
+ui/send_loop.py                       候选驱动发送编排
+templates/ / static/                  深色桌面控制台
+tests/                                pytest 回归测试
 ```
 
----
+## 测试
 
-## 🧪 测试
-
-```bash
+```powershell
 pytest tests/ -v
-# 66 passed
+pytest tests/test_send_loop_participation.py -v
 ```
 
----
+当前完整回归基线为 `140 passed`。测试使用 mock，不会向真实 Telegram 群组或 AI 服务发送请求。
 
-## ⚙️ 控制流程
+## 安全与数据
 
-```
-[开始]
-  │
-  ├── 定时窗口检查 → 不在窗口则等待
-  ├── 思考延迟 (5-25s)
-  ├── 潜水判断 → 10% 概率整轮跳过
-  │
-  ├─ TXT 模式 ─→ 随机选句
-  │
-  └─ AI 模式 ──→ 去重检查 (上条仍在? → 跳过)
-          │       ↓ 通过
-          │     获取群聊上下文
-          │       ↓
-          │     DeepSeek 生成回复
-          │       ↓ 失败 → 回退 TXT
-          │
-          ▼
-    打字模拟 (3-8s "正在输入...")
-          │
-          ▼
-    发送消息 → 计数更新 → 随机间隔
-          │
-          └── 循环 ←──┘
-
-[暂停] → 完成当前轮 → PAUSED
-[继续] → 恢复发送
-[停止] → 确认对话框 → 断开
-```
-
----
-
-## 🔧 依赖
-
-| Package | 用途 |
-|---------|------|
-| `telethon` ≥1.34 | Telegram 客户端 |
-| `flet` ≥0.84 | GUI 框架 |
-| `python-dotenv` | 配置管理 |
-| `python-socks[asyncio]` | SOCKS5 代理 |
-| `openai` ≥1.0 | AI API |
-| `pytest` ≥7 | 测试 |
-
----
-
-## ⚠️ 注意
-
-- 使用**用户账号**，滥用可能被限制
-- `sender_session.session` 含令牌，**勿分享**
-- AI 模式需自行申请 DeepSeek API Key
-- 最低发送间隔建议 ≥20s
-
-## 📄 License
-
-MIT
+- 不要提交 `.env`、`*.session`、数据库文件、API key、手机号或 Telegram 凭据。
+- `state/be_water.db` 包含群组标识、计数和审计记录，已由 `.gitignore` 排除。
+- 备份状态前先停止程序，再复制 `state/be_water.db`；恢复时同样保持程序停止并替换该文件。Telegram session 应单独按凭据保管，不能上传到代码仓库。
+- 严重告警不会跨日静默恢复，必须在“安全与审计”页面人工确认。
+- AI/TXT 均不可用、配置无效或状态持久化失败时，系统会跳过或停止发送。

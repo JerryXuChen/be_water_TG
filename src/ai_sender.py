@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections import deque
 
 from src.ai_client import AIClient
@@ -89,13 +90,14 @@ class AISender:
             messages.append({
                 "role": "user",
                 "content": "群聊记录（从早到晚）：\n" + "\n".join(context_lines)
-                + "\n\n请根据以上对话，自然地回复一条消息。",
+                + "\n\n请根据以上对话，自然地回复一条消息。"
+                + "如果没有相关且有价值的内容可补充，只回复 [SKIP]。",
             })
         else:
             # 无上下文时，给出通用指令
             messages.append({
                 "role": "user",
-                "content": "请自然地发一条群聊消息。",
+                "content": "请结合群聊主题自然地发一条消息；若无法确定相关内容，只回复 [SKIP]。",
             })
 
         # 添加 AI 自己最近说的话（记忆）
@@ -107,11 +109,39 @@ class AISender:
         # 4. 调用 AI（同步方法放到线程池）
         reply = await asyncio.to_thread(self._client.chat, messages)
 
-        # 5. 存入记忆
+        logger.info("🤖 AI 生成候选 [%s]: %s", group, reply[:30])
+        return reply
+
+    async def classify_message(
+        self,
+        group: str,
+        text: str,
+        context_count: int = 5,
+    ) -> str:
+        """Semantically classify a new group message for participation policy."""
+        del group, context_count
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是群聊参与分类器。只输出 QUESTION、DISCUSSION 或 IRRELEVANT。"
+                    "QUESTION 表示对群友提出问题、求助或请求解决；"
+                    "DISCUSSION 表示有实质内容的普通讨论；"
+                    "IRRELEVANT 表示寒暄、表情、广告、链接或无需参与的低信息内容。"
+                ),
+            },
+            {"role": "user", "content": text.strip()},
+        ]
+        reply = await asyncio.to_thread(self._client.chat, messages)
+        labels = re.findall(r"\b(QUESTION|DISCUSSION|IRRELEVANT)\b", reply.upper())
+        if len(set(labels)) != 1:
+            raise ValueError(f"Unexpected classification response: {reply!r}")
+        return labels[0].casefold()
+
+    def commit_sent(self, group: str, text: str) -> None:
+        """Commit AI memory after the external send is durably confirmed."""
         if group not in self._memory:
             self._memory[group] = deque(maxlen=DEFAULT_MEMORY_SIZE)
-        self._memory[group].append(reply)
-        self._sent_texts.add(reply)
-
-        logger.info("🤖 AI 生成回复 [%s]: %s", group, reply[:30])
-        return reply
+        self._memory[group].append(text)
+        self._sent_texts.add(text)
+        logger.info("🤖 已提交发送历史 [%s]: %s", group, text[:30])
