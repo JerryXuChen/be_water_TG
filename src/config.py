@@ -69,6 +69,15 @@ class Settings:
     reply_delay_max: int = 90
     state_db_path: str = "state/be_water.db"
 
+    # 宽松群：仅按“最近消息是否含自己发送”触发，并执行铺量发送
+    loose_groups: list[str] = field(default_factory=list)
+    loose_cooldown_min: int = 10  # 宽松群两次发送之间的最小冷却（分钟）
+    loose_message_file: str = "egg_answers.txt"  # 宽松群语料库
+    loose_min_parts: int = 2  # 一次铺量发送的最少条数
+    loose_max_parts: int = 5  # 一次铺量发送的最多条数
+    loose_part_gap_min: int = 5  # 每条之间的随机间隔下限（秒）
+    loose_part_gap_max: int = 10  # 每条之间的随机间隔上限（秒）
+
     def __post_init__(self) -> None:
         """同步 target_group 与 target_groups 以保持向后兼容。"""
         normalized_groups: list[str] = []
@@ -151,6 +160,19 @@ def validate_settings_for_save(settings: Settings) -> None:
             raise SettingsValidationError("schedule_morning_start", "Invalid schedule time") from exc
         if any(start > end for start, end in windows):
             raise SettingsValidationError("schedule_morning_start", "Schedule start must not be after end")
+
+    if settings.loose_min_parts < 1 or settings.loose_max_parts < settings.loose_min_parts:
+        raise SettingsValidationError(
+            "loose_min_parts",
+            "loose_min_parts 必须 >=1 且 <= loose_max_parts",
+        )
+    if settings.loose_part_gap_min < 0 or settings.loose_part_gap_max < settings.loose_part_gap_min:
+        raise SettingsValidationError(
+            "loose_part_gap_min",
+            "loose_part_gap_min 必须 >=0 且 <= loose_part_gap_max",
+        )
+    if settings.loose_cooldown_min < 0:
+        raise SettingsValidationError("loose_cooldown_min", "loose_cooldown_min 必须 >=0")
 
 
 def _parse_legacy_message_file(part: str) -> tuple[str, str]:
@@ -301,6 +323,16 @@ def load_settings() -> Settings:
     reply_delay_max = int(os.getenv("REPLY_DELAY_MAX", "90"))
     state_db_path = os.getenv("STATE_DB_PATH", "state/be_water.db")
 
+    # 宽松群配置（可选）
+    loose_groups_raw = os.getenv("LOOSE_GROUPS", "")
+    loose_groups = [g.strip() for g in loose_groups_raw.replace("，", ",").split(",") if g.strip()]
+    loose_cooldown_min = int(os.getenv("LOOSE_COOLDOWN_MIN", "10"))
+    loose_message_file = os.getenv("LOOSE_MESSAGE_FILE", "egg_answers.txt")
+    loose_min_parts = int(os.getenv("LOOSE_MIN_PARTS", "2"))
+    loose_max_parts = int(os.getenv("LOOSE_MAX_PARTS", "5"))
+    loose_part_gap_min = int(os.getenv("LOOSE_PART_GAP_MIN", "5"))
+    loose_part_gap_max = int(os.getenv("LOOSE_PART_GAP_MAX", "10"))
+
     if group_gap_max < group_gap_min:
         raise ValueError(
             f"GROUP_GAP_MAX ({group_gap_max}) must be >= GROUP_GAP_MIN ({group_gap_min})"
@@ -347,6 +379,13 @@ def load_settings() -> Settings:
         reply_delay_min=reply_delay_min,
         reply_delay_max=reply_delay_max,
         state_db_path=state_db_path,
+        loose_groups=loose_groups,
+        loose_cooldown_min=loose_cooldown_min,
+        loose_message_file=loose_message_file,
+        loose_min_parts=loose_min_parts,
+        loose_max_parts=loose_max_parts,
+        loose_part_gap_min=loose_part_gap_min,
+        loose_part_gap_max=loose_part_gap_max,
     )
 
 

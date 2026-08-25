@@ -23,7 +23,7 @@ from src.participation_policy import (
 )
 from src.safety_guard import SafetyGuard
 from src.sender import TelegramSender
-from src.state_store import PauseKind, StateStore
+from src.state_store import APP_TIMEZONE, PauseKind, StateStore
 from ui.message_manager import MessageManager
 
 if TYPE_CHECKING:
@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 RETRY_DELAYS = [30, 60, 120]
 MAX_RETRIES = 3
-OBSERVATION_INTERVAL = 10
+OBSERVATION_INTERVAL = 60
 
 
 class SendState(Enum):
@@ -145,6 +145,10 @@ def _candidate_from_observation(observation: Observation) -> ParticipationCandid
     return None
 
 
+# 文本超过该字数（字符数）直接判为 IRRELEVANT，不再调用 AI 分类。
+MAX_CLASSIFY_TEXT_LEN = 10
+
+
 async def _classify_candidate_with_ai(
     ai_sender: AISender | None,
     candidate: ParticipationCandidate,
@@ -152,6 +156,13 @@ async def _classify_candidate_with_ai(
     context_count: int,
 ) -> ParticipationCandidate:
     """Prefer semantic classification and retain a deterministic fallback."""
+    # 超长文本直接判不相关，跳过 AI 调用。
+    if len(text.strip()) > MAX_CLASSIFY_TEXT_LEN:
+        logger.debug(
+            "[分类] %s 文本超 %d 字(共%d)，直接 IRRELEVANT 跳过AI",
+            candidate.group, MAX_CLASSIFY_TEXT_LEN, len(text.strip()),
+        )
+        return replace(candidate, relevant=False)
     if ai_sender is None or candidate.kind is CandidateKind.IDLE:
         return candidate
     classifier = getattr(ai_sender, "classify_message", None)
@@ -174,7 +185,13 @@ async def _classify_candidate_with_ai(
     if normalized == CandidateKind.DISCUSSION.value:
         return replace(candidate, kind=CandidateKind.DISCUSSION, relevant=True)
     if normalized == "irrelevant":
-        return replace(candidate, relevant=False)
+        # 放宽判断：AI 判为 IRRELEVANT 不再一票否决，回退到本地关键词判定
+        # （含 吗/如何/怎么 等关键词 -> QUESTION 且 relevant=True），保留对纯垃圾的过滤。
+        logger.debug(
+            "[分类] %s AI 判 IRRELEVANT，回退本地关键词判定 (relevant=%s)",
+            candidate.group, candidate.relevant,
+        )
+        return candidate
     logger.warning(
         "Unknown AI classification %r; using deterministic fallback [%s]",
         classification,
@@ -219,6 +236,116 @@ async def _send_with_retry(
     return False
 
 
+async def _loose_send(
+    sender: TelegramSender,
+    store: StateStore,
+    manager: SendLoopManager,
+    event_bus: EventBus | None,
+    settings: Settings,
+    group: str,
+    observation_limit: int,
+    message_manager: MessageManager,
+) -> None:
+    """宽松群铺量发送逻辑。
+
+    规则：拉取最近 observation_limit 条消息，若其中没有任何一条是自己发送的，
+    则从语料库随机取一条，按逗号拆分为 2-5 句，逐条发送（每条间隔随机 5-10 秒）。
+    距离上次发送需冷却 loose_cooldown_min 分钟，且计入 daily_limit。
+    """
+    state = store.get_group_state(group)
+    if state.paused:
+        return
+
+    # 冷却检查：距上次发送不足冷却时间则不触发
+    if state.last_outbound_at is not None:
+        elapsed = (datetime.now(APP_TIMEZONE) - state.last_outbound_at).total_seconds()
+        if elapsed < settings.loose_cooldown_min * 60:
+            logger.debug(
+                "[宽松] %s 冷却中（剩余 %.0fs），跳过",
+                group, settings.loose_cooldown_min * 60 - elapsed,
+            )
+            return
+
+    # 日限额检查
+    if state.sent_count >= settings.daily_limit:
+        logger.debug("[宽松] %s 已达日限额 %d，跳过", group, settings.daily_limit)
+        return
+
+    try:
+        raw_messages = await sender.get_recent_messages(group, limit=observation_limit)
+    except ChannelPrivateError:
+        logger.warning("[宽松] %s 无法读取（可能未加入/被移出）", group)
+        return
+    except Exception:
+        logger.exception("[宽松] %s 拉取消息失败", group)
+        return
+
+    # 最近 N 条是否含自己发送
+    contains_self = any(getattr(m, "is_self", False) for m in raw_messages)
+    logger.debug(
+        "[宽松] %s 最近%d条 含自己发送=%s",
+        group, len(raw_messages), contains_self,
+    )
+    if contains_self:
+        return
+
+    # 取语料并拆分
+    corpus = message_manager.load_loose_messages(settings.loose_message_file)
+    if not corpus:
+        logger.warning("[宽松] %s 语料库为空，跳过", group)
+        return
+    chosen = random.choice(corpus)
+    parts = [p.strip() for p in chosen.split(",") if p.strip()]
+    if not parts:
+        return
+    count = min(
+        max(random.randint(settings.loose_min_parts, settings.loose_max_parts), 1),
+        len(parts),
+    )
+    selected = random.sample(parts, count) if count < len(parts) else parts
+
+    logger.info(
+        "[宽松] %s 触发铺量：发送 %d 条（语料: %s）",
+        group, count, chosen[:30],
+    )
+
+    for i, text in enumerate(selected):
+        if manager.state in (SendState.PAUSING, SendState.PAUSED):
+            break
+        # 逐条发送前再次检查总额（避免超额）
+        cur = store.get_group_state(group)
+        if cur.sent_count >= settings.daily_limit:
+            logger.debug("[宽松] %s 发送中途达日限额，停止", group)
+            break
+        try:
+            store.reserve_send(group, settings.daily_limit)
+        except Exception as exc:
+            logger.warning("[宽松] %s 无法预留额度: %s", group, exc)
+            break
+        sent = await _send_with_retry(sender, group, text, manager.stop_event, event_bus)
+        if not sent:
+            try:
+                store.release_send_reservation(group)
+            except Exception:
+                logger.exception("[宽松] %s 释放额度失败", group)
+            break
+        try:
+            persisted = store.confirm_send(group, settings.daily_limit)
+        except Exception as exc:
+            logger.exception("[宽松] %s 发送后状态确认失败", group)
+            break
+        total, per_group = manager.increment_count(group, persisted.sent_count)
+        store.record_audit(group, "loose_sent", "loose", {"count": persisted.sent_count})
+        if event_bus:
+            await event_bus.emit_counter(total, per_group)
+            await event_bus.emit_group_state(StateStore.serialize_state(persisted))
+        # 每条之间随机间隔 5-10 秒（最后一条后无需等待）
+        if i < count - 1:
+            gap = random.randint(settings.loose_part_gap_min, settings.loose_part_gap_max)
+            logger.debug("[宽松] %s 第%d条已发，间隔 %ds", group, i + 1, gap)
+            await _interruptible_wait(gap, manager.stop_event, event_bus)
+
+
 async def send_loop(
     sender: TelegramSender,
     settings: Settings,
@@ -242,6 +369,13 @@ async def send_loop(
     )
     for state in store.list_group_states(settings.target_groups):
         manager.set_persisted_count(state.group, state.sent_count)
+
+    # 宽松群集合（与白名单群互斥：出现在 LOOSE_GROUPS 中的群走铺量逻辑）
+    loose_groups = set(settings.loose_groups) & set(settings.target_groups)
+    for lg in settings.loose_groups:
+        if lg not in settings.target_groups:
+            logger.warning("宽松群未出现在 TARGET_GROUPS 中，将被忽略: %s", lg)
+    LOOSE_OBSERVE_LIMIT = 10  # 宽松群观察最近 N 条以判断“是否含自己发送”
 
     pending: dict[str, PendingCandidate] = {}
 
@@ -379,6 +513,18 @@ async def send_loop(
             persisted_state = store.get_group_state(group)
             if persisted_state.paused:
                 continue
+
+            # 宽松群走独立的铺量发送逻辑
+            if group in loose_groups:
+                try:
+                    await _loose_send(
+                        sender, store, manager, event_bus, settings,
+                        group, observation_limit=LOOSE_OBSERVE_LIMIT,
+                        message_manager=message_manager,
+                    )
+                except Exception:
+                    logger.exception("宽松群处理异常 [%s]", group)
+                continue
             try:
                 observation = await observer.observe(sender, group)
             except FloodWaitError as exc:
@@ -392,6 +538,15 @@ async def send_loop(
                 if event_bus:
                     await event_bus.emit_decision(group, "skip", "observation_failed")
                 continue
+
+            logger.debug(
+                "[观察] %s 拉到消息=%d 最新是否自己=%s idle=%s 新消息=%s",
+                group,
+                len(observation.new_messages),
+                observation.latest_message_is_self,
+                observation.idle,
+                [m.text[:40] for m in observation.new_messages][-5:],
+            )
 
             if await apply_safety(group, observation):
                 continue
@@ -429,6 +584,16 @@ async def send_loop(
                 )
             state = store.get_group_state(group)
             decision = policy.evaluate(candidate, state, settings)
+            logger.debug(
+                "[决策] %s 候选类型=%s relevant=%s 是否允许=%s 原因=%s 已发=%d/日限=%d",
+                group,
+                candidate.kind.value,
+                candidate.relevant,
+                decision.allowed,
+                decision.reason,
+                state.sent_count,
+                settings.daily_limit,
+            )
             store.record_audit(
                 group,
                 "decision",

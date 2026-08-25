@@ -58,6 +58,29 @@ class MessageManager:
         """
         if group not in self._selectors:
             raise KeyError(f"群组未注册: {group}")
+
+    def load_loose_messages(self, file_path: str) -> list[str]:
+        """加载宽松群语料库（按行，忽略 # 注释与空行）。
+
+        Args:
+            file_path: 语料库文件路径。
+
+        Returns:
+            有效语料行列表。
+        """
+        import os
+
+        if not os.path.exists(file_path):
+            logger.warning("宽松群语料库不存在: %s", file_path)
+            return []
+        with open(file_path, "r", encoding="utf-8") as handle:
+            lines = [
+                ln.strip()
+                for ln in handle
+                if ln.strip() and not ln.strip().startswith("#")
+            ]
+        logger.info("已加载 %d 条宽松群语料从: %s", len(lines), file_path)
+        return lines
         return self._selectors[group].select()
 
 

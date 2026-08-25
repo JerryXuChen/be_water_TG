@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import logging
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from time import monotonic
@@ -9,6 +10,8 @@ from typing import Any, Callable
 from telethon.errors import FloodWaitError
 
 from src.state_store import APP_TIMEZONE, StateStore
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -117,6 +120,10 @@ class ActivityObserver:
     async def observe(self, sender: Any, group: str, limit: int = 20) -> Observation:
         state = self._store.get_group_state(group)
         raw_messages = await sender.get_recent_messages(group, limit=limit)
+        logger.debug(
+            "[拉取] %s 原始消息条数=%d 历史last_message_id=%s",
+            group, len(raw_messages), state.last_message_id,
+        )
         snapshots = sorted(
             (self.snapshot(message) for message in raw_messages),
             key=lambda item: item.message_id,

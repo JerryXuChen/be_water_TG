@@ -30,11 +30,15 @@ def setup_root_logger():
     ]
 
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.DEBUG,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
         handlers=handlers,
     )
+
+    # 第三方库的底层调试日志会刷屏且无业务价值，调回 INFO。
+    for noisy in ("telethon", "httpx", "httpx2", "werkzeug", "aiosqlite"):
+        logging.getLogger(noisy).setLevel(logging.INFO)
 
 
 if __name__ == "__main__":
